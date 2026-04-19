@@ -1,0 +1,126 @@
+# GitHub Actions — two-path deploy for {@ ENV_NAME @}
+#
+# Path 1 — pulumi/** changed   → pulumi preview (PR) or pulumi up (push)
+# Path 2 — app files changed,  → SSM: git pull + docker-compose up -d
+#           pulumi NOT changed
+#
+# Required repository secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+#   PULUMI_ACCESS_TOKEN, PULUMI_STACK, PULUMI_CONFIG_PASSPHRASE
+#   EC2_INSTANCE_ID
+
+name: Deploy — {@ ENV_NAME @}
+
+on:
+  push:
+    branches: ["{@ ENV_NAME @}"]
+  pull_request:
+    branches: ["{@ ENV_NAME @}"]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      infra: ${{ steps.filter.outputs.infra }}
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            infra:
+              - 'pulumi/**'
+            app:
+              - 'docker-compose.yml'
+              - 'docker-compose.prod.yml'
+              - 'blueprint/**'
+              - 'model/**'
+
+  # ── PR: preview infra changes ──────────────────────────────────────────────
+  pulumi-preview:
+    needs: detect-changes
+    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+        working-directory: pulumi
+      - uses: pulumi/actions@v5
+        with:
+          command: preview
+          stack-name: ${{ secrets.PULUMI_STACK }}
+          work-dir: pulumi
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: {@ AWS_REGION @}
+
+  # ── Push: apply infra changes ──────────────────────────────────────────────
+  pulumi-apply:
+    needs: detect-changes
+    if: github.event_name == 'push' && needs.detect-changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+        working-directory: pulumi
+      - uses: pulumi/actions@v5
+        with:
+          command: up
+          stack-name: ${{ secrets.PULUMI_STACK }}
+          work-dir: pulumi
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: {@ AWS_REGION @}
+
+  # ── Push: redeploy app (no infra change) ──────────────────────────────────
+  deploy-app:
+    needs: detect-changes
+    if: >
+      github.event_name == 'push' &&
+      needs.detect-changes.outputs.app == 'true' &&
+      needs.detect-changes.outputs.infra != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: {@ AWS_REGION @}
+
+      - name: Restart services via SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["cd /home/ubuntu/cube && git pull && docker-compose -f docker-compose.yml up -d"]' \
+            --query "Command.CommandId" --output text)
+          echo "SSM Command: $CMD_ID"
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "  [$i] $STATUS"
+            case "$STATUS" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut) echo "Deploy $STATUS"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
+            --query "StandardOutputContent" --output text

@@ -18,6 +18,25 @@ _dwe_hub:
   hub_name: cube
   display_name: "Cube.js Semantic Layer"
   icon: "boxes"
+  git_providers:
+    - github
+    - gitlab
+  cloud_providers:
+    - aws
+  services:
+    - name: CubeJS
+      description: "Semantic layer — REST / GraphQL / WebSocket API over your data warehouse"
+    - name: CubeStore
+      description: "Pre-aggregation cache for sub-second query responses"
+    - name: Milvus
+      description: "Vector database for semantic / similarity search"
+    - name: RAG FastAPI
+      description: "Retrieval-augmented generation API backed by Milvus"
+    - name: dbt-cube-sync
+      description: "Syncs dbt models to Cube.js schema definitions automatically"
+  ci_templates:
+    github: ci-templates/github.yaml
+    gitlab: ci-templates/gitlab.yaml
   required_secrets:
     - key: git_deploy_token
       description: "GitHub / GitLab token to clone the adapter repo during hydration"
