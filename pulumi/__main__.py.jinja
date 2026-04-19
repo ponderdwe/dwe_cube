@@ -1,0 +1,155 @@
+"""
+DWE Cube Infrastructure — Pulumi IaC
+Provisions: EC2 instance + Elastic IP + Route53 A record
+
+Single-instance deployment (stateful — CubeStore + Milvus need persistent volumes).
+Run with: pulumi stack select prod && pulumi up --yes
+"""
+
+import base64
+import json
+
+import boto3
+import pulumi
+import pulumi_aws as aws
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stack Config
+# ─────────────────────────────────────────────────────────────────────────────
+config = pulumi.Config()
+env = config.require("environment")
+git_branch = config.require("git_branch")
+dns_name = config.require("dns_name")
+secret_id = config.require("secret_id")
+instance_type = config.get("instance_type") or "t3.xlarge"
+volume_size = int(config.get("volume_size") or "100")
+aws_region = config.get("aws_region") or "us-east-1"
+
+project_name = "{{ project_name }}"
+suffix = f"_{env}" if env != "prod" else ""
+tags = {
+    "Project": project_name,
+    "ManagedBy": "Pulumi",
+    "Environment": env,
+    "GitBranch": git_branch,
+}
+
+vpc_id = config.get("vpc_id") or "vpc-e1761d9a"
+subnet_id = config.get("subnet_id") or "subnet-089f0c524f4c5eba1"
+security_group_id = config.get("security_group_id") or "sg-5de95114"
+key_name = config.get("key_name") or "ubuntu-workstation"
+route53_zone_id = config.get("route53_zone_id") or ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Load secrets from AWS Secrets Manager
+# ─────────────────────────────────────────────────────────────────────────────
+def get_secret(sid: str) -> dict:
+    client = boto3.client("secretsmanager", region_name=aws_region)
+    resp = client.get_secret_value(SecretId=sid)
+    return json.loads(resp["SecretString"])
+
+secrets = get_secret(secret_id)
+git_deploy_token = secrets["git_deploy_token"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IAM — EC2 role (SSM + Bedrock)
+# ─────────────────────────────────────────────────────────────────────────────
+instance_role = aws.iam.Role(
+    f"{project_name}-role{suffix}",
+    name=f"{project_name}-role{suffix}",
+    assume_role_policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}],
+    }),
+    tags=tags,
+)
+aws.iam.RolePolicyAttachment(f"{project_name}-ssm{suffix}", role=instance_role.name,
+    policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore")
+aws.iam.RolePolicyAttachment(f"{project_name}-bedrock{suffix}", role=instance_role.name,
+    policy_arn="arn:aws:iam::aws:policy/AmazonBedrockFullAccess")
+instance_profile = aws.iam.InstanceProfile(
+    f"{project_name}-profile{suffix}", name=f"{project_name}-profile{suffix}",
+    role=instance_role.name, tags=tags,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EC2 user_data: install Docker, clone repo, write .env from Secrets Manager
+# ─────────────────────────────────────────────────────────────────────────────
+user_data_script = f"""#!/bin/bash
+set -e
+apt-get update -y
+apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common git python3-pip
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io
+curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+chmod +x /usr/local/bin/docker-compose
+pip3 install boto3
+cd /home/ubuntu
+git clone https://x-token-auth:{git_deploy_token}@github.com/ponderedw/dwe_cube.git cube
+cd cube && git checkout {git_branch}
+python3 -c "
+import boto3, json
+sm = boto3.client('secretsmanager', region_name='{aws_region}')
+s = json.loads(sm.get_secret_value(SecretId='{secret_id}')['SecretString'])
+with open('/home/ubuntu/cube/.env', 'w') as f:
+    for k, v in s.items():
+        f.write(f'{{k}}={{v}}\\n')
+"
+docker-compose -f docker-compose.yml up -d
+"""
+user_data = base64.b64encode(user_data_script.encode()).decode()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EC2 Instance
+# ─────────────────────────────────────────────────────────────────────────────
+ubuntu_ami = aws.ec2.get_ami(
+    most_recent=True,
+    filters=[
+        aws.ec2.GetAmiFilterArgs(name="name", values=["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]),
+        aws.ec2.GetAmiFilterArgs(name="virtualization-type", values=["hvm"]),
+    ],
+    owners=["099720109477"],
+)
+
+instance = aws.ec2.Instance(
+    f"{project_name}-instance{suffix}",
+    ami=ubuntu_ami.id,
+    instance_type=instance_type,
+    subnet_id=subnet_id,
+    vpc_security_group_ids=[security_group_id],
+    key_name=key_name,
+    iam_instance_profile=instance_profile.name,
+    root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(
+        volume_size=volume_size, volume_type="gp2",
+        encrypted=True, delete_on_termination=True,
+    ),
+    user_data=user_data,
+    tags={**tags, "Name": f"cube{suffix}"},
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Elastic IP
+# ─────────────────────────────────────────────────────────────────────────────
+eip = aws.ec2.Eip(
+    f"{project_name}-eip{suffix}",
+    instance=instance.id,
+    tags={**tags, "Name": f"{project_name}-eip{suffix}"},
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Route53
+# ─────────────────────────────────────────────────────────────────────────────
+if route53_zone_id:
+    aws.route53.Record(
+        f"{project_name}-dns{suffix}",
+        zone_id=route53_zone_id, name=dns_name, type="A", ttl=30,
+        records=[eip.public_ip],
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ─────────────────────────────────────────────────────────────────────────────
+pulumi.export("instance_id", instance.id)
+pulumi.export("public_ip", eip.public_ip)
+pulumi.export("environment", env)

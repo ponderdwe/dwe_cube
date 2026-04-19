@@ -1,0 +1,237 @@
+# DWE Cube — Full Stack Docker Compose
+# Includes: Cube.js + CubeStore + Milvus (RAG) + FastAPI + Streamlit UI
+#
+# Usage:
+#   cp .env.example .env  # fill in values
+#   docker compose up -d
+#   just sync             # run DBT → Cube → Superset sync
+
+version: "3.9"
+
+networks:
+  cube_network:
+    driver: bridge
+
+volumes:
+  milvus-data:
+  milvus-etcd-data:
+  milvus-minio-data:
+
+services:
+
+  # ── CubeStore — distributed pre-aggregation cache ─────────────
+  cubestore_router:
+    image: cubejs/cubestore:latest
+    platform: linux/amd64
+    restart: always
+    environment:
+      - CUBESTORE_WORKERS=cubestore_worker_1:10001,cubestore_worker_2:10002
+      - CUBESTORE_REMOTE_DIR=/cube/data
+      - CUBESTORE_META_PORT=9999
+      - CUBESTORE_SERVER_NAME=cubestore_router:9999
+    volumes:
+      - .cubestore:/cube/data
+    networks:
+      - cube_network
+
+  cubestore_worker_1:
+    image: cubejs/cubestore:latest
+    platform: linux/amd64
+    restart: always
+    environment:
+      - CUBESTORE_WORKERS=cubestore_worker_1:10001,cubestore_worker_2:10002
+      - CUBESTORE_SERVER_NAME=cubestore_worker_1:10001
+      - CUBESTORE_WORKER_PORT=10001
+      - CUBESTORE_REMOTE_DIR=/cube/data
+      - CUBESTORE_META_ADDR=cubestore_router:9999
+    volumes:
+      - .cubestore:/cube/data
+    depends_on:
+      - cubestore_router
+    networks:
+      - cube_network
+
+  cubestore_worker_2:
+    image: cubejs/cubestore:latest
+    platform: linux/amd64
+    restart: always
+    environment:
+      - CUBESTORE_WORKERS=cubestore_worker_1:10001,cubestore_worker_2:10002
+      - CUBESTORE_SERVER_NAME=cubestore_worker_2:10002
+      - CUBESTORE_WORKER_PORT=10002
+      - CUBESTORE_REMOTE_DIR=/cube/data
+      - CUBESTORE_META_ADDR=cubestore_router:9999
+    volumes:
+      - .cubestore:/cube/data
+    depends_on:
+      - cubestore_router
+    networks:
+      - cube_network
+
+  # ── Cube.js refresh worker ─────────────────────────────────────
+  cube_refresh_worker:
+    image: cubejs/cube:latest
+    restart: always
+    env_file: .env
+    environment:
+      - CUBEJS_CUBESTORE_HOST=cubestore_router
+      - CUBEJS_REFRESH_WORKER=true
+    volumes:
+      - .:/cube/conf
+    depends_on:
+      - cubestore_router
+      - cubestore_worker_1
+      - cubestore_worker_2
+    networks:
+      - cube_network
+
+  # ── Cube.js API ────────────────────────────────────────────────
+  cube_api:
+    image: cubejs/cube:latest
+    restart: always
+    ports:
+      - "4000:4000"
+      - "15432:15432"
+    env_file: .env
+    environment:
+      - CUBEJS_CUBESTORE_HOST=cubestore_router
+    volumes:
+      - .:/cube/conf
+    depends_on:
+      - cube_refresh_worker
+      - cubestore_router
+      - cubestore_worker_1
+      - cubestore_worker_2
+    networks:
+      - cube_network
+
+  # ── Milvus vector DB — for RAG ─────────────────────────────────
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    restart: always
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - milvus-etcd-data:/etcd
+    command: >
+      etcd
+      -advertise-client-urls=http://127.0.0.1:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - cube_network
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    restart: always
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - milvus-minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - cube_network
+
+  milvus:
+    image: milvusdb/milvus:v2.4.6
+    restart: always
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - milvus-data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+    networks:
+      - cube_network
+
+  # ── RAG FastAPI service ────────────────────────────────────────
+  fastapi:
+    image: pondered/cube-rag-api:latest
+    restart: always
+    env_file: .env
+    depends_on:
+      milvus:
+        condition: service_healthy
+      cube_api:
+        condition: service_started
+    networks:
+      - cube_network
+
+  # ── Streamlit chat UI ──────────────────────────────────────────
+  cube-chat-ui:
+    image: pondered/cube-chat-ui:latest
+    restart: always
+    env_file: .env
+    ports:
+      - "8501:8501"
+    depends_on:
+      - fastapi
+    networks:
+      - cube_network
+
+  # ── DBT → Cube → Superset sync ─────────────────────────────────
+  dbt-cube-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile.sync
+    volumes:
+      - .:/workspace
+      - ./.sync-state:/workspace/.sync-state
+    working_dir: /workspace
+    env_file: .env
+    depends_on:
+      cube_api:
+        condition: service_started
+      fastapi:
+        condition: service_started
+    entrypoint: []
+    command:
+      - "/bin/sh"
+      - "-c"
+      - |
+        echo 'Waiting for services...'
+        sleep 15
+        echo 'Step 1: Extracting dbt metadata...'
+        python extract_dbt_metadata.py
+        echo 'Step 2: Running incremental sync pipeline...'
+        dbt-cube-sync sync-all \
+          --manifest dbt_metadata/manifest.json \
+          --sqlalchemy-uri "$$DATABASE_URI" \
+          --output model/cubes \
+          --state-path .sync-state/.dbt-cube-sync-state.json \
+          --superset-url "$$SUPERSET_URL" \
+          --superset-username "$$SUPERSET_USERNAME" \
+          --superset-password "$$SUPERSET_PASSWORD" \
+          --cube-connection-name Cube \
+          --rag-api-url http://fastapi:8080
+    networks:
+      - cube_network
+    profiles:
+      - sync

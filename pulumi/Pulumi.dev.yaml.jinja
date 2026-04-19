@@ -1,0 +1,13 @@
+config:
+  {{ project_name }}:environment: dev
+  {{ project_name }}:git_branch: develop
+  {{ project_name }}:dns_name: dev.{{ dns_name }}
+  {{ project_name }}:secret_id: {{ secret_id }}_dev
+  {{ project_name }}:instance_type: t3.large
+  {{ project_name }}:volume_size: "50"
+  {{ project_name }}:aws_region: {{ aws_region }}
+  # Override with your actual IDs:
+  # {{ project_name }}:vpc_id: vpc-xxxxxxxxx
+  # {{ project_name }}:subnet_id: subnet-xxxxxxxxx
+  # {{ project_name }}:security_group_id: sg-xxxxxxxxx
+  # {{ project_name }}:route53_zone_id: ZXXXXXXXXXX

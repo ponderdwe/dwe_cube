@@ -1,0 +1,10 @@
+name: {{ project_name }}
+description: DWE Cube Infrastructure for {{ project_name }} (EC2 + EIP + Route53)
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: dwe-cube

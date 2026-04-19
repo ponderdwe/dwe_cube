@@ -1,0 +1,16 @@
+# DWE Cube — sync service dependencies
+# Used by the dbt-cube-sync Docker service
+
+# DBT → Cube → Superset sync
+dbt-cube-sync>=0.4.0
+
+# Database drivers (add the one matching your warehouse)
+psycopg2-binary>=2.9.9        # PostgreSQL / Redshift
+# pyathena>=3.0.0              # Athena
+# snowflake-sqlalchemy>=1.5.0  # Snowflake
+# google-cloud-bigquery>=3.0.0 # BigQuery
+
+# HTTP / utilities
+requests>=2.31.0
+python-dotenv>=1.0.0
+boto3>=1.34.0
