@@ -20,6 +20,7 @@ variables:
   AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
   PULUMI_BACKEND_URL: $PULUMI_S3_STATE
   WORKSPACE: "{@ WORKSPACE_NAME @}"
+  PULUMI_CONFIG_PASSPHRASE: ""
 
 # ── MR: preview infra changes ─────────────────────────────────────────────────
 pulumi-preview-{@ ENV_NAME @}:
