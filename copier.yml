@@ -49,10 +49,10 @@ _dwe_hub:
     # instances by environment tag — no SSH, no hard-coded instance IDs.
     - key: AWS_ACCESS_KEY_ID
       description: "AWS access key — Pulumi uses this to provision infrastructure and SSM to redeploy the app"
-      destination: ci
+      destination: [ci, secrets_manager]
     - key: AWS_SECRET_ACCESS_KEY
       description: "AWS secret key"
-      destination: ci
+      destination: [ci, secrets_manager]
     - key: PULUMI_S3_STATE
       description: "S3 URL for Pulumi state backend, e.g. s3://my-pulumi-state-bucket"
       destination: ci
