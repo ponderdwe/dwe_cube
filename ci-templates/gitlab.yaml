@@ -36,7 +36,8 @@ pulumi-preview-{@ ENV_NAME @}:
   script:
     - export PATH="$HOME/.pulumi/bin:$PATH"
     - pulumi login $PULUMI_BACKEND_URL
-    - cd pulumi && pulumi preview --stack $WORKSPACE
+    - cd pulumi && (pulumi stack select $WORKSPACE 2>/dev/null || pulumi stack init $WORKSPACE)
+    - pulumi preview --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
@@ -56,7 +57,8 @@ pulumi-apply-{@ ENV_NAME @}:
   script:
     - export PATH="$HOME/.pulumi/bin:$PATH"
     - pulumi login $PULUMI_BACKEND_URL
-    - cd pulumi && pulumi up --yes --stack $WORKSPACE
+    - cd pulumi && (pulumi stack select $WORKSPACE 2>/dev/null || pulumi stack init $WORKSPACE)
+    - pulumi up --yes --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
