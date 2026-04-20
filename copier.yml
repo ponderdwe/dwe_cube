@@ -44,23 +44,17 @@ _dwe_hub:
   # CI only needs AWS credentials to run Pulumi and manage the autoscaling group via SSM.
   required_secrets:
     # ── CI secrets (GitHub / GitLab repository secrets) ──────────────────────
+    # Only AWS credentials are needed in CI.  Pulumi state lives in S3 (no
+    # Pulumi SaaS token).  App redeployment uses SSM Run Command targeting
+    # instances by environment tag — no SSH, no hard-coded instance IDs.
     - key: AWS_ACCESS_KEY_ID
-      description: "AWS access key — Pulumi uses this to provision EC2, EIP, Route53 and SSM to redeploy the app"
+      description: "AWS access key — Pulumi uses this to provision infrastructure and SSM to redeploy the app"
       destination: ci
     - key: AWS_SECRET_ACCESS_KEY
       description: "AWS secret key"
       destination: ci
-    - key: PULUMI_ACCESS_TOKEN
-      description: "Pulumi SaaS token for state backend (https://app.pulumi.com/)"
-      destination: ci
-    - key: PULUMI_CONFIG_PASSPHRASE
-      description: "Passphrase used to encrypt Pulumi stack secrets"
-      destination: ci
-    - key: PULUMI_STACK
-      description: "Fully-qualified Pulumi stack name, e.g. myorg/cube-client/prod"
-      destination: ci
-    - key: EC2_INSTANCE_ID
-      description: "EC2 instance ID for SSM app-only redeploy — available as a Pulumi output after the first `pulumi up`"
+    - key: PULUMI_S3_STATE
+      description: "S3 URL for Pulumi state backend, e.g. s3://my-pulumi-state-bucket"
       destination: ci
 
     # ── AWS Secrets Manager: DWE_DEPLOY_CUBE (or DWE_DEPLOY_CUBE_dev) ────────

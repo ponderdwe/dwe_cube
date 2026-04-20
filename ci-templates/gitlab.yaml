@@ -1,13 +1,16 @@
-# GitLab CI — two-path deploy for {@ ENV_NAME @}
+# GitLab CI — two-path deploy for branch {@ ENV_NAME @} → workspace {@ WORKSPACE_NAME @}
 #
 # Path 1 — pulumi/** changed   → pulumi preview (MR) or pulumi up (push)
-# Path 2 — app files changed,  → SSM: git pull + docker-compose up -d
+# Path 2 — app files changed,  → SSM: git pull + docker-compose up (no SSH, no instance ID)
 #           pulumi NOT changed
 #
-# Required CI/CD variables:
-#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-#   PULUMI_ACCESS_TOKEN, PULUMI_STACK, PULUMI_CONFIG_PASSPHRASE
-#   EC2_INSTANCE_ID
+# Required CI/CD variables (repository secrets only):
+#   AWS_ACCESS_KEY_ID      — AWS credentials for Pulumi + SSM
+#   AWS_SECRET_ACCESS_KEY  — AWS credentials for Pulumi + SSM
+#   PULUMI_S3_STATE        — S3 backend URL, e.g. s3://my-pulumi-state-bucket
+#
+# All application secrets live in AWS Secrets Manager: {@ SECRET_NAME @}
+# Pulumi reads that secret at deploy time; EC2 pulls it on first boot.
 
 stages:
   - infra
@@ -15,6 +18,8 @@ stages:
 
 variables:
   AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+  PULUMI_BACKEND_URL: $PULUMI_S3_STATE
+  WORKSPACE: "{@ WORKSPACE_NAME @}"
 
 # ── MR: preview infra changes ─────────────────────────────────────────────────
 pulumi-preview:
@@ -27,12 +32,10 @@ pulumi-preview:
   before_script:
     - pip install -r pulumi/requirements.txt
   script:
-    - cd pulumi && pulumi preview --stack $PULUMI_STACK
+    - cd pulumi && pulumi preview --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
-    PULUMI_ACCESS_TOKEN: $PULUMI_ACCESS_TOKEN
-    PULUMI_CONFIG_PASSPHRASE: $PULUMI_CONFIG_PASSPHRASE
 
 # ── Push: apply infra changes ─────────────────────────────────────────────────
 pulumi-apply:
@@ -45,14 +48,12 @@ pulumi-apply:
   before_script:
     - pip install -r pulumi/requirements.txt
   script:
-    - cd pulumi && pulumi up --yes --stack $PULUMI_STACK
+    - cd pulumi && pulumi up --yes --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
-    PULUMI_ACCESS_TOKEN: $PULUMI_ACCESS_TOKEN
-    PULUMI_CONFIG_PASSPHRASE: $PULUMI_CONFIG_PASSPHRASE
 
-# ── Push: redeploy app (no infra change) ──────────────────────────────────────
+# ── Push: redeploy app via SSM (no SSH, no instance ID) ──────────────────────
 deploy-app:
   stage: deploy
   image: python:3.11-slim
@@ -72,15 +73,16 @@ deploy-app:
   script:
     - |
       CMD_ID=$(aws ssm send-command \
-        --instance-ids "$EC2_INSTANCE_ID" \
+        --targets "Key=tag:Environment,Values={@ ENV_NAME @}" \
         --document-name "AWS-RunShellScript" \
         --parameters 'commands=["cd /home/ubuntu/cube && git pull && docker-compose -f docker-compose.yml up -d"]' \
         --query "Command.CommandId" --output text)
       echo "SSM Command: $CMD_ID"
       for i in $(seq 1 30); do
-        STATUS=$(aws ssm get-command-invocation \
-          --command-id "$CMD_ID" --instance-id "$EC2_INSTANCE_ID" \
-          --query Status --output text 2>/dev/null || echo Pending)
+        STATUS=$(aws ssm list-command-invocations \
+          --command-id "$CMD_ID" \
+          --details \
+          --query "CommandInvocations[0].Status" --output text 2>/dev/null || echo Pending)
         echo "  [$i] $STATUS"
         case "$STATUS" in
           Success) break ;;

@@ -1,13 +1,16 @@
-# GitHub Actions — two-path deploy for {@ ENV_NAME @}
+# GitHub Actions — two-path deploy for branch {@ ENV_NAME @} → workspace {@ WORKSPACE_NAME @}
 #
 # Path 1 — pulumi/** changed   → pulumi preview (PR) or pulumi up (push)
-# Path 2 — app files changed,  → SSM: git pull + docker-compose up -d
+# Path 2 — app files changed,  → SSM: git pull + docker-compose up (no SSH, no instance ID)
 #           pulumi NOT changed
 #
-# Required repository secrets:
-#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-#   PULUMI_ACCESS_TOKEN, PULUMI_STACK, PULUMI_CONFIG_PASSPHRASE
-#   EC2_INSTANCE_ID
+# Required repository secrets (CI only):
+#   AWS_ACCESS_KEY_ID      — AWS credentials for Pulumi + SSM
+#   AWS_SECRET_ACCESS_KEY  — AWS credentials for Pulumi + SSM
+#   PULUMI_S3_STATE        — S3 backend URL, e.g. s3://my-pulumi-state-bucket
+#
+# All application secrets live in AWS Secrets Manager: DWE_DEPLOY_CUBE (or DWE_DEPLOY_CUBE_{ENV})
+# Pulumi reads that secret at deploy time; the EC2 instance pulls it on first boot.
 
 name: Deploy — {@ ENV_NAME @}
 
@@ -16,6 +19,11 @@ on:
     branches: ["{@ ENV_NAME @}"]
   pull_request:
     branches: ["{@ ENV_NAME @}"]
+
+env:
+  AWS_REGION: {@ AWS_REGION @}
+  WORKSPACE: {@ WORKSPACE_NAME @}
+  SM_SECRET: {@ SECRET_NAME @}
 
 jobs:
   detect-changes:
@@ -52,11 +60,10 @@ jobs:
       - uses: pulumi/actions@v5
         with:
           command: preview
-          stack-name: ${{ secrets.PULUMI_STACK }}
+          stack-name: ${{ env.WORKSPACE }}
           work-dir: pulumi
         env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: {@ AWS_REGION @}
@@ -76,16 +83,15 @@ jobs:
       - uses: pulumi/actions@v5
         with:
           command: up
-          stack-name: ${{ secrets.PULUMI_STACK }}
+          stack-name: ${{ env.WORKSPACE }}
           work-dir: pulumi
         env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: {@ AWS_REGION @}
 
-  # ── Push: redeploy app (no infra change) ──────────────────────────────────
+  # ── Push: redeploy app via SSM (no SSH, no instance ID) ───────────────────
   deploy-app:
     needs: detect-changes
     if: >
@@ -100,19 +106,19 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: {@ AWS_REGION @}
 
-      - name: Restart services via SSM
+      - name: Redeploy app via SSM (target by Environment tag)
         run: |
           CMD_ID=$(aws ssm send-command \
-            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --targets "Key=tag:Environment,Values={@ ENV_NAME @}" \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=["cd /home/ubuntu/cube && git pull && docker-compose -f docker-compose.yml up -d"]' \
             --query "Command.CommandId" --output text)
           echo "SSM Command: $CMD_ID"
           for i in $(seq 1 30); do
-            STATUS=$(aws ssm get-command-invocation \
+            STATUS=$(aws ssm list-command-invocations \
               --command-id "$CMD_ID" \
-              --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-              --query "Status" --output text 2>/dev/null || echo "Pending")
+              --details \
+              --query "CommandInvocations[0].Status" --output text 2>/dev/null || echo "Pending")
             echo "  [$i] $STATUS"
             case "$STATUS" in
               Success) break ;;
@@ -120,7 +126,3 @@ jobs:
             esac
             sleep 10
           done
-          aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-            --query "StandardOutputContent" --output text
