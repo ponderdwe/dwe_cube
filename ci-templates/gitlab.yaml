@@ -16,12 +16,6 @@ stages:
   - infra
   - deploy
 
-variables:
-  AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
-  PULUMI_BACKEND_URL: $PULUMI_S3_STATE
-  WORKSPACE: "{@ WORKSPACE_NAME @}"
-  PULUMI_CONFIG_PASSPHRASE: ""
-
 # ── MR: preview infra changes ─────────────────────────────────────────────────
 pulumi-preview-{@ ENV_NAME @}:
   stage: infra
@@ -36,12 +30,15 @@ pulumi-preview-{@ ENV_NAME @}:
     - pip install -r pulumi/requirements.txt
   script:
     - export PATH="$HOME/.pulumi/bin:$PATH"
-    - pulumi login $PULUMI_BACKEND_URL
+    - pulumi login $PULUMI_S3_STATE
     - cd pulumi && (pulumi stack select $WORKSPACE 2>/dev/null || pulumi stack init $WORKSPACE)
     - pulumi preview --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+    PULUMI_CONFIG_PASSPHRASE: ""
+    WORKSPACE: "{@ WORKSPACE_NAME @}"
 
 # ── Push: apply infra changes ─────────────────────────────────────────────────
 pulumi-apply-{@ ENV_NAME @}:
@@ -57,12 +54,15 @@ pulumi-apply-{@ ENV_NAME @}:
     - pip install -r pulumi/requirements.txt
   script:
     - export PATH="$HOME/.pulumi/bin:$PATH"
-    - pulumi login $PULUMI_BACKEND_URL
+    - pulumi login $PULUMI_S3_STATE
     - cd pulumi && (pulumi stack select $WORKSPACE 2>/dev/null || pulumi stack init $WORKSPACE)
     - pulumi up --yes --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+    PULUMI_CONFIG_PASSPHRASE: ""
+    WORKSPACE: "{@ WORKSPACE_NAME @}"
 
 # ── Push: redeploy app via SSM (no SSH, no instance ID) ──────────────────────
 deploy-app-{@ ENV_NAME @}:
