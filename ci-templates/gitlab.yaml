@@ -22,7 +22,7 @@ variables:
   WORKSPACE: "{@ WORKSPACE_NAME @}"
 
 # ── MR: preview infra changes ─────────────────────────────────────────────────
-pulumi-preview:
+pulumi-preview-{@ ENV_NAME @}:
   stage: infra
   image: python:3.11-slim
   rules:
@@ -30,15 +30,18 @@ pulumi-preview:
       changes:
         - pulumi/**/*
   before_script:
+    - apt-get update -qq && apt-get install -y -qq curl
+    - curl -fsSL https://get.pulumi.com | sh
     - pip install -r pulumi/requirements.txt
   script:
+    - export PATH="$HOME/.pulumi/bin:$PATH"
     - cd pulumi && pulumi preview --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
 
 # ── Push: apply infra changes ─────────────────────────────────────────────────
-pulumi-apply:
+pulumi-apply-{@ ENV_NAME @}:
   stage: infra
   image: python:3.11-slim
   rules:
@@ -46,15 +49,18 @@ pulumi-apply:
       changes:
         - pulumi/**/*
   before_script:
+    - apt-get update -qq && apt-get install -y -qq curl
+    - curl -fsSL https://get.pulumi.com | sh
     - pip install -r pulumi/requirements.txt
   script:
+    - export PATH="$HOME/.pulumi/bin:$PATH"
     - cd pulumi && pulumi up --yes --stack $WORKSPACE
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
 
 # ── Push: redeploy app via SSM (no SSH, no instance ID) ──────────────────────
-deploy-app:
+deploy-app-{@ ENV_NAME @}:
   stage: deploy
   image: python:3.11-slim
   rules:

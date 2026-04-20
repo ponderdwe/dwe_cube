@@ -49,10 +49,10 @@ _dwe_hub:
     # instances by environment tag — no SSH, no hard-coded instance IDs.
     - key: AWS_ACCESS_KEY_ID
       description: "AWS access key — Pulumi uses this to provision infrastructure and SSM to redeploy the app"
-      destination: [ci, secrets_manager]
+      destination: ci
     - key: AWS_SECRET_ACCESS_KEY
       description: "AWS secret key"
-      destination: [ci, secrets_manager]
+      destination: ci
     - key: PULUMI_S3_STATE
       description: "S3 URL for Pulumi state backend, e.g. s3://my-pulumi-state-bucket"
       destination: ci
@@ -60,6 +60,9 @@ _dwe_hub:
     # ── AWS Secrets Manager: DWE_DEPLOY_CUBE (or DWE_DEPLOY_CUBE_dev) ────────
     - key: git_deploy_token
       description: "GitHub / GitLab token — EC2 uses this to clone the repo on first boot"
+      destination: secrets_manager
+    - key: git_deploy_username
+      description: "GitHub / GitLab username paired with git_deploy_token for HTTPS clone (e.g. a bot account)"
       destination: secrets_manager
     - key: CUBEJS_DB_TYPE
       description: "Data warehouse driver (postgres | bigquery | snowflake | athena | redshift | trino …)"
