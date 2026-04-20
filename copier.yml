@@ -58,6 +58,24 @@ _dwe_hub:
       destination: ci
 
     # ── AWS Secrets Manager: DWE_DEPLOY_CUBE (or DWE_DEPLOY_CUBE_dev) ────────
+    - key: ROUTE53_ZONE_ID
+      description: "Route53 hosted zone ID (e.g. Z1D633PJN98FT9)"
+      destination: secrets_manager
+    - key: DNS_NAME
+      description: "Public DNS name for the Cube API (e.g. cube.myorg.com)"
+      destination: secrets_manager
+    - key: ACM_CERTIFICATE_ARN
+      description: "ACM certificate ARN for HTTPS on the ALB (must cover DNS_NAME)"
+      destination: secrets_manager
+    - key: VPC_ID
+      description: "AWS VPC ID where the infrastructure is deployed"
+      destination: secrets_manager
+    - key: ALB_SUBNET_IDS
+      description: "JSON array of public subnet IDs for the ALB (e.g. [\"subnet-aaa\",\"subnet-bbb\"])"
+      destination: secrets_manager
+    - key: KEY_NAME
+      description: "EC2 key pair name for SSH access (optional)"
+      destination: secrets_manager
     - key: git_deploy_token
       description: "GitHub / GitLab token — EC2 uses this to clone the repo on first boot"
       destination: secrets_manager
@@ -173,11 +191,6 @@ volume_size:
   type: int
   default: 100
   help: "EBS root volume size in GB. Milvus vector index can grow large."
-
-dns_name:
-  type: str
-  default: cube.example.com
-  help: "Public DNS name for the Cube.js API (Route53 A record target)"
 
 secret_id:
   type: str

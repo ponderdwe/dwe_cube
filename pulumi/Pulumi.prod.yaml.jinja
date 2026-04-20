@@ -1,13 +1,7 @@
 config:
   {{ project_name }}:environment: prod
   {{ project_name }}:git_branch: main
-  {{ project_name }}:dns_name: {{ dns_name }}
   {{ project_name }}:secret_id: {{ secret_id }}
   {{ project_name }}:instance_type: {{ instance_type }}
   {{ project_name }}:volume_size: "{{ volume_size }}"
   {{ project_name }}:aws_region: {{ aws_region }}
-  # Override with your actual IDs:
-  # {{ project_name }}:vpc_id: vpc-xxxxxxxxx
-  # {{ project_name }}:subnet_id: subnet-xxxxxxxxx
-  # {{ project_name }}:security_group_id: sg-xxxxxxxxx
-  # {{ project_name }}:route53_zone_id: ZXXXXXXXXXX
