@@ -37,46 +37,85 @@ _dwe_hub:
   ci_templates:
     github: ci-templates/github.yaml
     gitlab: ci-templates/gitlab.yaml
+  # destination: ci           → add as a GitHub / GitLab repository secret
+  # destination: secrets_manager → store in AWS Secrets Manager under DWE_DEPLOY_CUBE
+  #
+  # Pulumi reads ALL runtime config from DWE_DEPLOY_CUBE at deploy time.
+  # CI only needs AWS credentials to run Pulumi and manage the autoscaling group via SSM.
   required_secrets:
-    - key: git_deploy_token
-      description: "GitHub / GitLab token to clone the adapter repo during hydration"
+    # ── CI secrets (GitHub / GitLab repository secrets) ──────────────────────
     - key: AWS_ACCESS_KEY_ID
-      description: "AWS access key — Pulumi uses this to provision EC2, EIP, Route53"
+      description: "AWS access key — Pulumi uses this to provision EC2, EIP, Route53 and SSM to redeploy the app"
+      destination: ci
     - key: AWS_SECRET_ACCESS_KEY
-      description: "AWS secret access key"
+      description: "AWS secret key"
+      destination: ci
+    - key: PULUMI_ACCESS_TOKEN
+      description: "Pulumi SaaS token for state backend (https://app.pulumi.com/)"
+      destination: ci
+    - key: PULUMI_CONFIG_PASSPHRASE
+      description: "Passphrase used to encrypt Pulumi stack secrets"
+      destination: ci
+    - key: PULUMI_STACK
+      description: "Fully-qualified Pulumi stack name, e.g. myorg/cube-client/prod"
+      destination: ci
+    - key: EC2_INSTANCE_ID
+      description: "EC2 instance ID for SSM app-only redeploy — available as a Pulumi output after the first `pulumi up`"
+      destination: ci
+
+    # ── AWS Secrets Manager: DWE_DEPLOY_CUBE (or DWE_DEPLOY_CUBE_dev) ────────
+    - key: git_deploy_token
+      description: "GitHub / GitLab token — EC2 uses this to clone the repo on first boot"
+      destination: secrets_manager
     - key: CUBEJS_DB_TYPE
       description: "Data warehouse driver (postgres | bigquery | snowflake | athena | redshift | trino …)"
+      destination: secrets_manager
     - key: CUBEJS_DB_HOST
       description: "Data warehouse hostname"
+      destination: secrets_manager
     - key: CUBEJS_DB_PORT
       description: "Data warehouse port (e.g. 5432 for Postgres)"
+      destination: secrets_manager
     - key: CUBEJS_DB_NAME
       description: "Data warehouse database / catalog name"
+      destination: secrets_manager
     - key: CUBEJS_DB_USER
       description: "Data warehouse username"
+      destination: secrets_manager
     - key: CUBEJS_DB_PASS
       description: "Data warehouse password"
+      destination: secrets_manager
     - key: CUBEJS_API_SECRET
       description: "JWT signing secret for Cube.js API — generate with: openssl rand -hex 32"
+      destination: secrets_manager
     - key: SUPERSET_URL
       description: "Superset instance URL for dbt-cube-sync (e.g. https://superset.myorg.com)"
+      destination: secrets_manager
     - key: SUPERSET_USERNAME
       description: "Superset username used by dbt-cube-sync"
+      destination: secrets_manager
     - key: SUPERSET_PASSWORD
       description: "Superset password for the sync user"
+      destination: secrets_manager
   optional_secrets:
     - key: OPENAI_API_KEY
       description: "OpenAI API key for Milvus RAG embeddings"
+      destination: secrets_manager
     - key: DATABASE_URI
       description: "SQLAlchemy URI for dbt-cube-sync metadata (defaults to local SQLite)"
+      destination: secrets_manager
     - key: AWS_DEFAULT_REGION
       description: "AWS region (defaults to us-east-1)"
+      destination: secrets_manager
     - key: LLM_PROVIDER
       description: "LLM provider (openai | anthropic | bedrock | ollama)"
+      destination: secrets_manager
     - key: LLM_MODEL_ID
       description: "LLM model ID"
+      destination: secrets_manager
     - key: LLM_API_KEY
       description: "API key for the chosen LLM provider"
+      destination: secrets_manager
 
 _templates_suffix: .jinja
 
@@ -145,7 +184,8 @@ dns_name:
 
 secret_id:
   type: str
-  default: "{{ project_name }}_cube"
+  default: "DWE_DEPLOY_CUBE"
   help: >
-    AWS Secrets Manager secret name that holds runtime credentials
-    (CUBEJS_DB_*, SUPERSET_*, OPENAI_API_KEY, git_deploy_token, etc.)
+    AWS Secrets Manager secret name that holds all runtime credentials
+    (CUBEJS_DB_*, SUPERSET_*, OPENAI_API_KEY, git_deploy_token, etc.).
+    Per-environment stacks append a suffix automatically: DWE_DEPLOY_CUBE_dev, DWE_DEPLOY_CUBE_prod.
