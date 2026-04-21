@@ -50,6 +50,7 @@ vpc_id                = secrets["VPC_ID"]
 alb_subnet_ids        = json.loads(secrets["ALB_SUBNET_IDS"])
 key_name              = secrets["KEY_NAME"]
 ec2_security_group_id = secrets["EC2_SECURITY_GROUP_ID"]
+lb_security_group_id  = secrets["LB_SECURITY_GROUP_ID"]
 alb_internal          = secrets.get("ALB_INTERNAL", "false").lower() == "true"
 
 # ── Networking / DNS ──────────────────────────────────────────────────────────
@@ -205,7 +206,7 @@ alb = aws.lb.LoadBalancer(
     name=f"{project_name}-alb{suffix}",
     internal=alb_internal,
     load_balancer_type="application",
-    security_groups=[alb_sg.id],
+    security_groups=[alb_sg.id, lb_security_group_id],
     subnets=alb_subnet_ids,
     idle_timeout=600,
     tags={**tags, "Name": f"{project_name}-alb{suffix}"},
