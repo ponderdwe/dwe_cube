@@ -92,29 +92,37 @@ instance_profile = aws.iam.InstanceProfile(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Security Groups
+# Security Groups — scoped by ALB visibility (internal vs internet-facing)
 # ─────────────────────────────────────────────────────────────────────────────
+vpc_info = aws.ec2.get_vpc(id=vpc_id)
+
+# Internal ALB: restrict to VPC CIDR. External: open to internet.
+alb_cidr = [vpc_info.cidr_block] if alb_internal else ["0.0.0.0/0"]
+
 alb_sg = aws.ec2.SecurityGroup(
     f"{project_name}-alb-sg{suffix}",
     name=f"{project_name}-alb-sg{suffix}",
-    description="Cube ALB - HTTP/HTTPS from internet",
+    description="Cube ALB - HTTP/HTTPS",
     vpc_id=vpc_id,
     ingress=[
-        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=80,  to_port=80,  cidr_blocks=["0.0.0.0/0"]),
-        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=443, to_port=443, cidr_blocks=["0.0.0.0/0"]),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=80,  to_port=80,  cidr_blocks=alb_cidr),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=443, to_port=443, cidr_blocks=alb_cidr),
     ],
     egress=[aws.ec2.SecurityGroupEgressArgs(protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"])],
     tags={**tags, "Name": f"{project_name}-alb-sg{suffix}"},
 )
 
+# Internal ALB: SSH only from VPC. External: SSH from internet.
+ssh_cidr = [vpc_info.cidr_block] if alb_internal else ["0.0.0.0/0"]
+
 ec2_sg = aws.ec2.SecurityGroup(
     f"{project_name}-ec2-sg{suffix}",
     name=f"{project_name}-ec2-sg{suffix}",
-    description="Cube EC2 - app from ALB, SSH from internet",
+    description="Cube EC2 - app from ALB",
     vpc_id=vpc_id,
     ingress=[
         aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=app_port, to_port=app_port, security_groups=[alb_sg.id]),
-        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=22,       to_port=22,       cidr_blocks=["0.0.0.0/0"]),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=22,       to_port=22,       cidr_blocks=ssh_cidr),
     ],
     egress=[aws.ec2.SecurityGroupEgressArgs(protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"])],
     tags={**tags, "Name": f"{project_name}-ec2-sg{suffix}"},
@@ -165,7 +173,7 @@ subprocess.run(['git', 'checkout', '{git_branch}'], check=True, cwd='/home/ubunt
 # Write .env from the same secret
 with open('/home/ubuntu/cube/.env', 'w') as f:
     for k, v in s.items():
-        f.write(f'{{k}}={{v}}\n')
+        f.write(str(k) + '=' + str(v) + '\n')
 PYEOF
 
 docker-compose -f docker-compose.yml up -d --project-directory /home/ubuntu/cube
