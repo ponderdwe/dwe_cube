@@ -44,15 +44,31 @@ def get_secret(sid: str) -> dict:
     return json.loads(resp["SecretString"])
 
 secrets = get_secret(secret_id)
+
+# ── Infrastructure ────────────────────────────────────────────────────────────
+vpc_id                = secrets["VPC_ID"]
+alb_subnet_ids        = json.loads(secrets["ALB_SUBNET_IDS"])
+key_name              = secrets["KEY_NAME"]
+ec2_security_group_id = secrets["EC2_SECURITY_GROUP_ID"]
+alb_internal          = secrets.get("ALB_INTERNAL", "false").lower() == "true"
+
+# ── Networking / DNS ──────────────────────────────────────────────────────────
+route53_zone_id     = secrets["ROUTE53_ZONE_ID"]
+dns_name            = secrets["DNS_NAME"]
+acm_certificate_arn = secrets["ACM_CERTIFICATE_ARN"]
+
+# ── Git ───────────────────────────────────────────────────────────────────────
 git_deploy_token    = secrets["git_deploy_token"]
 git_deploy_username = secrets.get("git_deploy_username", "x-token-auth")
-dns_name            = secrets["DNS_NAME"]
-route53_zone_id     = secrets["ROUTE53_ZONE_ID"]
-acm_certificate_arn = secrets["ACM_CERTIFICATE_ARN"]
-vpc_id              = secrets["VPC_ID"]
-alb_subnet_ids      = json.loads(secrets["ALB_SUBNET_IDS"])  # JSON array string: ["subnet-aaa","subnet-bbb"]
-key_name            = secrets.get("KEY_NAME", "")
-ec2_security_group_id = secrets.get("EC2_SECURITY_GROUP_ID", "")
+
+# ── Application ───────────────────────────────────────────────────────────────
+cubejs_db_type    = secrets["CUBEJS_DB_TYPE"]
+cubejs_db_host    = secrets["CUBEJS_DB_HOST"]
+cubejs_db_port    = secrets["CUBEJS_DB_PORT"]
+cubejs_db_name    = secrets["CUBEJS_DB_NAME"]
+cubejs_db_user    = secrets["CUBEJS_DB_USER"]
+cubejs_db_pass    = secrets["CUBEJS_DB_PASS"]
+cubejs_api_secret = secrets["CUBEJS_API_SECRET"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IAM — EC2 role (SSM + Bedrock + Secrets Manager)
@@ -132,18 +148,26 @@ chmod +x /usr/local/bin/docker-compose
 pip3 install boto3
 
 cd /home/ubuntu
-git clone https://{git_deploy_username}:{git_deploy_token}@gitlab.com/uncsch/cube-deploy.git cube
-cd cube && git checkout {git_branch}
+python3 << 'PYEOF'
+import boto3, json, subprocess, os
 
-python3 -c "
-import boto3, json
 sm = boto3.client('secretsmanager', region_name='{aws_region}')
 s = json.loads(sm.get_secret_value(SecretId='{secret_id}')['SecretString'])
+
+# Clone — inject credentials without shell splitting on special chars
+username = s.get('git_deploy_username', 'x-token-auth')
+token    = s['git_deploy_token']
+repo_url = '{{ git_repo_url }}'.replace('https://', f'https://{{username}}:{{token}}@')
+subprocess.run(['git', 'clone', repo_url, 'cube'], check=True, cwd='/home/ubuntu')
+subprocess.run(['git', 'checkout', '{git_branch}'], check=True, cwd='/home/ubuntu/cube')
+
+# Write .env from the same secret
 with open('/home/ubuntu/cube/.env', 'w') as f:
     for k, v in s.items():
-        f.write(f'{{k}}={{v}}\\n')
-"
-docker-compose -f docker-compose.yml up -d
+        f.write(f'{{k}}={{v}}\n')
+PYEOF
+
+docker-compose -f docker-compose.yml up -d --project-directory /home/ubuntu/cube
 """
 user_data = base64.b64encode(user_data_script.encode()).decode()
 
@@ -179,7 +203,7 @@ lt = aws.ec2.LaunchTemplate(
 alb = aws.lb.LoadBalancer(
     f"{project_name}-alb{suffix}",
     name=f"{project_name}-alb{suffix}",
-    internal=False,
+    internal=alb_internal,
     load_balancer_type="application",
     security_groups=[alb_sg.id],
     subnets=alb_subnet_ids,

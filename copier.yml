@@ -160,6 +160,11 @@ project_name:
     Example: acme-cube, my-org-semantic-layer
   validator: "{% if not (project_name | regex_search('^[a-z][a-z0-9-]+$')) %}Must be lowercase letters, numbers, hyphens{% endif %}"
 
+git_repo_url:
+  type: str
+  default: ""
+  when: false   # always set programmatically by dwe CLI
+
 adapter_name:
   type: str
   default: dwe_cube
