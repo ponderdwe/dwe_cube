@@ -52,6 +52,7 @@ acm_certificate_arn = secrets["ACM_CERTIFICATE_ARN"]
 vpc_id              = secrets["VPC_ID"]
 alb_subnet_ids      = json.loads(secrets["ALB_SUBNET_IDS"])  # JSON array string: ["subnet-aaa","subnet-bbb"]
 key_name            = secrets.get("KEY_NAME", "")
+ec2_security_group_id = secrets.get("EC2_SECURITY_GROUP_ID", "")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IAM — EC2 role (SSM + Bedrock + Secrets Manager)
@@ -79,7 +80,7 @@ instance_profile = aws.iam.InstanceProfile(
 alb_sg = aws.ec2.SecurityGroup(
     f"{project_name}-alb-sg{suffix}",
     name=f"{project_name}-alb-sg{suffix}",
-    description="Cube ALB — HTTP/HTTPS from internet",
+    description="Cube ALB - HTTP/HTTPS from internet",
     vpc_id=vpc_id,
     ingress=[
         aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=80,  to_port=80,  cidr_blocks=["0.0.0.0/0"]),
@@ -92,7 +93,7 @@ alb_sg = aws.ec2.SecurityGroup(
 ec2_sg = aws.ec2.SecurityGroup(
     f"{project_name}-ec2-sg{suffix}",
     name=f"{project_name}-ec2-sg{suffix}",
-    description="Cube EC2 — app from ALB, SSH from internet",
+    description="Cube EC2 - app from ALB, SSH from internet",
     vpc_id=vpc_id,
     ingress=[
         aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=app_port, to_port=app_port, security_groups=[alb_sg.id]),
@@ -155,7 +156,7 @@ lt = aws.ec2.LaunchTemplate(
     image_id=ubuntu_ami.id,
     instance_type=instance_type,
     key_name=key_name,
-    vpc_security_group_ids=[ec2_sg.id],
+    vpc_security_group_ids=[ec2_sg.id] + ([ec2_security_group_id] if ec2_security_group_id else []),
     iam_instance_profile=aws.ec2.LaunchTemplateIamInstanceProfileArgs(name=instance_profile.name),
     block_device_mappings=[aws.ec2.LaunchTemplateBlockDeviceMappingArgs(
         device_name="/dev/sda1",
