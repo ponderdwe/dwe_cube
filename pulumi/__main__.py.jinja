@@ -10,7 +10,7 @@ Run with: pulumi stack select prod && pulumi up --yes
 import base64
 import json
 
-import boto3
+import boto3  # used only by Pulumi at deploy time (not EC2 bootstrap)
 import pulumi
 import pulumi_aws as aws
 
@@ -153,33 +153,34 @@ set -e
 exec > >(tee /var/log/cube-init.log | logger -t cube-init) 2>&1
 
 apt-get update -y
-apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common git python3-pip
+apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common git jq unzip
+
+# AWS CLI v2 (EC2 IAM role provides credentials — no keys needed)
+curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+
+# Docker + Compose
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
 add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
 apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io
 curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 chmod +x /usr/local/bin/docker-compose
-pip3 install boto3
 
-cd /home/ubuntu
-python3 << 'PYEOF'
-import boto3, json, subprocess, os
+# Fetch all secrets from AWS Secrets Manager
+SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id {secret_id} --region {aws_region} --query SecretString --output text)
 
-sm = boto3.client('secretsmanager', region_name='{aws_region}')
-s = json.loads(sm.get_secret_value(SecretId='{secret_id}')['SecretString'])
+GIT_USER=$(echo "$SECRET_JSON" | jq -r '.git_deploy_username // "x-token-auth"')
+GIT_TOKEN=$(echo "$SECRET_JSON" | jq -r '.git_deploy_token')
 
-# Clone — inject credentials without shell splitting on special chars
-username = s.get('git_deploy_username', 'x-token-auth')
-token    = s['git_deploy_token']
-repo_url = '{{ git_repo_url }}'.replace('https://', f'https://{{username}}:{{token}}@')
-subprocess.run(['git', 'clone', repo_url, 'cube'], check=True, cwd='/home/ubuntu')
-subprocess.run(['git', 'checkout', '{git_branch}'], check=True, cwd='/home/ubuntu/cube')
+# Clone repo with credentials injected into URL
+REPO_URL="{{ git_repo_url }}"
+REPO_PATH=$(echo "$REPO_URL" | sed 's,https://,,')
+git clone "https://$GIT_USER:$GIT_TOKEN@$REPO_PATH" /home/ubuntu/cube
+git -C /home/ubuntu/cube checkout {git_branch}
 
-# Write .env from the same secret
-with open('/home/ubuntu/cube/.env', 'w') as f:
-    for k, v in s.items():
-        f.write(str(k) + '=' + str(v) + '\n')
-PYEOF
+# Write .env from all secret key=value pairs
+echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
 
 docker-compose -f docker-compose.yml up -d --project-directory /home/ubuntu/cube
 """
