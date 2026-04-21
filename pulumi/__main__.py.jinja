@@ -182,7 +182,7 @@ git -C /home/ubuntu/cube checkout {git_branch}
 # Write .env from all secret key=value pairs
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
 
-docker-compose -f docker-compose.yml up -d --project-directory /home/ubuntu/cube
+cd /home/ubuntu/cube && docker-compose up -d
 """
 user_data = base64.b64encode(user_data_script.encode()).decode()
 
