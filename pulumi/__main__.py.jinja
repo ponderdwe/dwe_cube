@@ -281,7 +281,7 @@ asg = aws.autoscaling.Group(
     target_group_arns=[tg.arn],
     launch_template=aws.autoscaling.GroupLaunchTemplateArgs(id=lt.id, version="$Latest"),
     health_check_type="ELB",
-    health_check_grace_period=300,
+    health_check_grace_period=600,
     instance_refresh=aws.autoscaling.GroupInstanceRefreshArgs(
         strategy="Rolling",
         preferences=aws.autoscaling.GroupInstanceRefreshPreferencesArgs(
