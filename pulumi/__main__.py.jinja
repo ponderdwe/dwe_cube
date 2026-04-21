@@ -92,41 +92,46 @@ instance_profile = aws.iam.InstanceProfile(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Security Groups — scoped by ALB visibility (internal vs internet-facing)
+# Security Groups — empty shells; rules managed separately so the SG itself
+# never needs replacing (avoids DependencyViolation on ALB ENIs).
 # ─────────────────────────────────────────────────────────────────────────────
 vpc_info = aws.ec2.get_vpc(id=vpc_id)
-
-# Internal ALB: restrict to VPC CIDR. External: open to internet.
-alb_cidr = [vpc_info.cidr_block] if alb_internal else ["0.0.0.0/0"]
+access_cidr = [vpc_info.cidr_block] if alb_internal else ["0.0.0.0/0"]
 
 alb_sg = aws.ec2.SecurityGroup(
     f"{project_name}-alb-sg{suffix}",
     name=f"{project_name}-alb-sg{suffix}",
-    description="Cube ALB - HTTP/HTTPS",
+    description="Cube ALB",
     vpc_id=vpc_id,
-    ingress=[
-        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=80,  to_port=80,  cidr_blocks=alb_cidr),
-        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=443, to_port=443, cidr_blocks=alb_cidr),
-    ],
-    egress=[aws.ec2.SecurityGroupEgressArgs(protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"])],
     tags={**tags, "Name": f"{project_name}-alb-sg{suffix}"},
 )
-
-# Internal ALB: SSH only from VPC. External: SSH from internet.
-ssh_cidr = [vpc_info.cidr_block] if alb_internal else ["0.0.0.0/0"]
+aws.ec2.SecurityGroupRule(f"{project_name}-alb-http{suffix}",
+    type="ingress", security_group_id=alb_sg.id,
+    protocol="tcp", from_port=80, to_port=80, cidr_blocks=access_cidr)
+aws.ec2.SecurityGroupRule(f"{project_name}-alb-https{suffix}",
+    type="ingress", security_group_id=alb_sg.id,
+    protocol="tcp", from_port=443, to_port=443, cidr_blocks=access_cidr)
+aws.ec2.SecurityGroupRule(f"{project_name}-alb-egress{suffix}",
+    type="egress", security_group_id=alb_sg.id,
+    protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"])
 
 ec2_sg = aws.ec2.SecurityGroup(
     f"{project_name}-ec2-sg{suffix}",
     name=f"{project_name}-ec2-sg{suffix}",
-    description="Cube EC2 - app from ALB",
+    description="Cube EC2",
     vpc_id=vpc_id,
-    ingress=[
-        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=app_port, to_port=app_port, security_groups=[alb_sg.id]),
-        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=22,       to_port=22,       cidr_blocks=ssh_cidr),
-    ],
-    egress=[aws.ec2.SecurityGroupEgressArgs(protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"])],
     tags={**tags, "Name": f"{project_name}-ec2-sg{suffix}"},
 )
+aws.ec2.SecurityGroupRule(f"{project_name}-ec2-app{suffix}",
+    type="ingress", security_group_id=ec2_sg.id,
+    protocol="tcp", from_port=app_port, to_port=app_port,
+    source_security_group_id=alb_sg.id)
+aws.ec2.SecurityGroupRule(f"{project_name}-ec2-ssh{suffix}",
+    type="ingress", security_group_id=ec2_sg.id,
+    protocol="tcp", from_port=22, to_port=22, cidr_blocks=access_cidr)
+aws.ec2.SecurityGroupRule(f"{project_name}-ec2-egress{suffix}",
+    type="egress", security_group_id=ec2_sg.id,
+    protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AMI
