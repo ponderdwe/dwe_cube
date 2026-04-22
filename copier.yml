@@ -34,6 +34,8 @@ _dwe_hub:
       description: "Retrieval-augmented generation API backed by Milvus"
     - name: dbt-cube-sync
       description: "Syncs dbt models to Cube.js schema definitions automatically"
+    - name: EC2 DNS
+      description: "Route53 A record pointing directly to the EC2 instance IP — private IP for internal ALB, public IP for internet-facing"
   ci_templates:
     github: ci-templates/github.yaml
     gitlab: ci-templates/gitlab.yaml
@@ -113,6 +115,12 @@ _dwe_hub:
       description: "Superset password for the sync user"
       destination: secrets_manager
   optional_secrets:
+    - key: HOSTED_ZONE_ID_EC2_DNS
+      description: "Route53 hosted zone ID for the EC2 DNS record (e.g. Z1MHSQZ1OR039Y). If set, EC2_DNS must also be set."
+      destination: secrets_manager
+    - key: EC2_DNS
+      description: "DNS name for the EC2 instance A record (e.g. cube.internal.myorg.com). Resolves to private IP when ALB is internal, public IP otherwise."
+      destination: secrets_manager
     - key: OPENAI_API_KEY
       description: "OpenAI API key for Milvus RAG embeddings"
       destination: secrets_manager

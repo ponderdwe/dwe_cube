@@ -71,6 +71,10 @@ cubejs_db_user    = secrets["CUBEJS_DB_USER"]
 cubejs_db_pass    = secrets["CUBEJS_DB_PASS"]
 cubejs_api_secret = secrets["CUBEJS_API_SECRET"]
 
+# ── EC2 DNS (optional) ────────────────────────────────────────────────────────
+ec2_dns_zone_id = secrets.get("HOSTED_ZONE_ID_EC2_DNS", "")
+ec2_dns_name    = secrets.get("EC2_DNS", "")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # IAM — EC2 role (SSM + Bedrock + Secrets Manager)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -303,6 +307,30 @@ aws.route53.Record(
     ttl=30,
     records=[alb.dns_name],
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Route53 — A record → EC2 instance IP (optional, for direct SSH access)
+# ─────────────────────────────────────────────────────────────────────────────
+if ec2_dns_zone_id and ec2_dns_name:
+    asg_instances = aws.ec2.get_instances_output(
+        filters=[aws.ec2.GetInstancesFilterArgs(
+            name="tag:aws:autoscaling:groupName",
+            values=[asg.name],
+        )],
+        instance_state_names=["running", "pending"],
+    )
+    if alb_internal:
+        ec2_ip = asg_instances.private_ips.apply(lambda ips: ips[0])
+    else:
+        ec2_ip = asg_instances.public_ips.apply(lambda ips: ips[0])
+    aws.route53.Record(
+        f"{project_name}-ec2-dns{suffix}",
+        zone_id=ec2_dns_zone_id,
+        name=ec2_dns_name,
+        type="A",
+        ttl=60,
+        records=[ec2_ip],
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
