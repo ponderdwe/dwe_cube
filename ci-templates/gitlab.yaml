@@ -111,7 +111,7 @@ deploy-app-{@ ENV_NAME @}:
     - |
       ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
         --filters \
-          "Name=tag:Environment,Values={@ ENV_NAME @}" \
+          "Name=tag:Environment,Values={@ WORKSPACE_NAME @}" \
           "Name=tag:ManagedBy,Values=Pulumi" \
         --query "AutoScalingGroups[0].AutoScalingGroupName" --output text)
       echo "Starting instance refresh for ASG: $ASG_NAME"
