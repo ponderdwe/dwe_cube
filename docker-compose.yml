@@ -75,6 +75,8 @@ services:
     env_file: .env
     environment:
       - CUBEJS_CUBESTORE_HOST=cubestore_router
+      - CUBEJS_EXT_DB_TYPE=cubestore
+      - CUBEJS_EXT_DB_HOST=cubestore_router
       - CUBEJS_REFRESH_WORKER=true
     volumes:
       - .:/cube/conf
@@ -95,6 +97,9 @@ services:
     env_file: .env
     environment:
       - CUBEJS_CUBESTORE_HOST=cubestore_router
+      - CUBEJS_EXT_DB_TYPE=cubestore
+      - CUBEJS_EXT_DB_HOST=cubestore_router
+      - CUBEJS_DEFAULT_API_SCOPES=meta,data,graphql,jobs,sql
     volumes:
       - .:/cube/conf
     depends_on:
