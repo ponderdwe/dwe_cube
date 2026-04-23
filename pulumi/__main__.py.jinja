@@ -163,6 +163,31 @@ ubuntu_ami = aws.ec2.get_ami(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Route53 self-registration block — built outside the f-string to avoid the
+# {{ collision between Python f-string escaping and Jinja2 template syntax
+# (both treat {{ as special). Plain string concat uses single { safely.
+# ─────────────────────────────────────────────────────────────────────────────
+if ec2_dns_name and ec2_dns_zone_id:
+    _ip_meta = "local-ipv4" if alb_internal else "public-ipv4"
+    _r53_json = (
+        '{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"'
+        + ec2_dns_name
+        + '","Type":"A","TTL":60,"ResourceRecords":[{"Value":"__EC2_IP__"}]}}]}'
+    )
+    _r53_block = f"""
+# Self-register EC2 DNS in Route53 — runs on every boot so IP stays current after instance refresh
+EC2_IP=$(curl -s http://169.254.169.254/latest/meta-data/{_ip_meta})
+R53_CHANGE='{_r53_json}'
+R53_CHANGE=$(echo "$R53_CHANGE" | sed "s/__EC2_IP__/$EC2_IP/")
+aws route53 change-resource-record-sets \\
+    --hosted-zone-id {ec2_dns_zone_id} \\
+    --region {aws_region} \\
+    --change-batch "$R53_CHANGE" || echo "WARNING: Route53 update failed — check IAM permissions"
+"""
+else:
+    _r53_block = ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # User data — install Docker, clone repo, write .env from Secrets Manager
 # ─────────────────────────────────────────────────────────────────────────────
 user_data_script = f"""#!/bin/bash
@@ -202,35 +227,7 @@ git -C /home/ubuntu/cube checkout {git_branch}
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
 
 cd /home/ubuntu/cube && docker-compose up -d
-
-# Self-register EC2 DNS in Route53 — runs on every boot so IP is always current after instance refresh
-if [ -n "{ec2_dns_name}" ] && [ -n "{ec2_dns_zone_id}" ]; then
-    if [ "{alb_internal}" = "True" ]; then
-        EC2_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
-    else
-        EC2_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-    fi
-    cat > /tmp/r53-change.json <<'R53EOF'
-{{
-  "Changes": [{{
-    "Action": "UPSERT",
-    "ResourceRecordSet": {{
-      "Name": "{ec2_dns_name}",
-      "Type": "A",
-      "TTL": 60,
-      "ResourceRecords": [{{"Value": "PLACEHOLDER"}}]
-    }}
-  }}]
-}}
-R53EOF
-    sed -i "s/PLACEHOLDER/$EC2_IP/" /tmp/r53-change.json
-    aws route53 change-resource-record-sets \
-        --hosted-zone-id {ec2_dns_zone_id} \
-        --region {aws_region} \
-        --change-batch file:///tmp/r53-change.json || echo "WARNING: Route53 update failed — check IAM permissions"
-    rm -f /tmp/r53-change.json
-fi
-"""
+{_r53_block}"""
 user_data = base64.b64encode(user_data_script.encode()).decode()
 
 # ─────────────────────────────────────────────────────────────────────────────
