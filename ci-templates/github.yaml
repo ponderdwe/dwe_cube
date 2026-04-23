@@ -104,10 +104,15 @@ jobs:
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
           PULUMI_CONFIG_PASSPHRASE: ""
-      - name: Wait for ASG instance refresh
+      - name: Start and wait for ASG instance refresh
         run: |
           ASG_NAME=$(cd pulumi && pulumi stack output asg_name --stack ${{ env.WORKSPACE }})
-          echo "Waiting for ASG instance refresh: $ASG_NAME"
+          echo "Starting instance refresh for ASG: $ASG_NAME"
+          aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --strategy Rolling \
+            --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":300}' 2>&1 || true
+          echo "Waiting for instance refresh..."
           for i in $(seq 1 40); do
             STATUS=$(aws autoscaling describe-instance-refreshes \
               --auto-scaling-group-name "$ASG_NAME" \

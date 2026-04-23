@@ -328,7 +328,6 @@ asg = aws.autoscaling.Group(
     health_check_grace_period=600,
     instance_refresh=aws.autoscaling.GroupInstanceRefreshArgs(
         strategy="Rolling",
-        triggers=["launch_template"],  # auto-refresh when launch template version changes
         preferences=aws.autoscaling.GroupInstanceRefreshPreferencesArgs(
             min_healthy_percentage=0,
             instance_warmup=300,
