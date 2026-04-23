@@ -2,14 +2,15 @@
 """
 extract_dbt_metadata.py
 
-Extracts dbt manifest.json from the project and writes it to dbt_metadata/.
-The dbt-cube-sync pipeline uses this manifest to generate Cube.js schema files.
+Extracts dbt manifest.json (and catalog.json) for the dbt-cube-sync pipeline.
+
+Resolution order:
+  1. dbt Cloud API  — if DBT_CLOUD_TOKEN + DBT_CLOUD_ACCOUNTID + DBT_CLOUD_JOB_ID are set
+  2. Pre-compiled manifest — dbt/target/manifest.json or /workspace/dbt/target/manifest.json
+  3. dbt compile  — if --dbt-project-dir is supplied or a dbt/ directory exists
 
 Usage:
     python extract_dbt_metadata.py [--dbt-project-dir /path/to/dbt]
-
-By default looks for the dbt project in /workspace/dbt (Docker mount) or ./dbt.
-If a compiled manifest already exists at target/manifest.json it is copied directly.
 """
 
 import argparse
@@ -20,11 +21,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 OUTPUT_DIR = Path("dbt_metadata")
-OUTPUT_FILE = OUTPUT_DIR / "manifest.json"
+MANIFEST_OUT = OUTPUT_DIR / "manifest.json"
+CATALOG_OUT = OUTPUT_DIR / "catalog.json"
 
-# Candidate locations for an already-compiled manifest
 MANIFEST_CANDIDATES = [
     Path("dbt/target/manifest.json"),
     Path("target/manifest.json"),
@@ -32,16 +37,65 @@ MANIFEST_CANDIDATES = [
 ]
 
 
-def find_existing_manifest() -> Path | None:
+# ── dbt Cloud ────────────────────────────────────────────────────────────────
+
+def _dbt_cloud_headers(token: str) -> dict:
+    return {"Authorization": f"Token {token}", "Content-Type": "application/json"}
+
+
+def _latest_run_id(token: str, account_id: str, job_id: str) -> int:
+    url = f"https://cloud.getdbt.com/api/v2/accounts/{account_id}/runs/"
+    resp = requests.get(
+        url,
+        headers=_dbt_cloud_headers(token),
+        params={"job_definition_id": job_id, "order_by": "-created_at", "limit": 1},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    runs = resp.json()["data"]
+    if not runs:
+        raise ValueError(f"No runs found for dbt Cloud job {job_id}")
+    return runs[0]["id"]
+
+
+def _download_artifact(token: str, account_id: str, run_id: int, artifact: str, dest: Path) -> None:
+    url = f"https://cloud.getdbt.com/api/v2/accounts/{account_id}/runs/{run_id}/artifacts/{artifact}.json"
+    resp = requests.get(url, headers=_dbt_cloud_headers(token), timeout=60)
+    resp.raise_for_status()
+    dest.write_text(json.dumps(resp.json(), indent=2))
+    print(f"Downloaded {artifact}.json → {dest}")
+
+
+def fetch_from_dbt_cloud() -> bool:
+    token = os.getenv("DBT_CLOUD_TOKEN")
+    account_id = os.getenv("DBT_CLOUD_ACCOUNTID")
+    job_id = os.getenv("DBT_CLOUD_JOB_ID")
+    if not all([token, account_id, job_id]):
+        return False
+
+    print(f"dbt Cloud credentials found — fetching artifacts for job {job_id} ...")
+    run_id = _latest_run_id(token, account_id, job_id)
+    print(f"Latest run: {run_id}")
+    _download_artifact(token, account_id, run_id, "manifest", MANIFEST_OUT)
+    try:
+        _download_artifact(token, account_id, run_id, "catalog", CATALOG_OUT)
+    except Exception as exc:
+        print(f"Warning: could not download catalog.json ({exc})")
+    return True
+
+
+# ── Local / compile ───────────────────────────────────────────────────────────
+
+def copy_existing_manifest() -> bool:
     for p in MANIFEST_CANDIDATES:
         if p.exists():
-            return p
-    return None
+            print(f"Found existing manifest at {p}, copying → {MANIFEST_OUT}")
+            shutil.copy2(p, MANIFEST_OUT)
+            return True
+    return False
 
 
-def compile_dbt(dbt_project_dir: Path) -> Path:
-    """Run `dbt compile` and return the path to the resulting manifest."""
-    manifest_path = dbt_project_dir / "target" / "manifest.json"
+def compile_dbt(dbt_project_dir: Path) -> None:
     print(f"Running dbt compile in {dbt_project_dir} ...")
     result = subprocess.run(
         ["dbt", "compile", "--project-dir", str(dbt_project_dir)],
@@ -50,53 +104,43 @@ def compile_dbt(dbt_project_dir: Path) -> Path:
     if result.returncode != 0:
         print("ERROR: dbt compile failed.", file=sys.stderr)
         sys.exit(result.returncode)
-    return manifest_path
+    shutil.copy2(dbt_project_dir / "target" / "manifest.json", MANIFEST_OUT)
 
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract dbt manifest for dbt-cube-sync")
-    parser.add_argument(
-        "--dbt-project-dir",
-        default=None,
-        help="Path to dbt project directory (default: auto-detect)",
-    )
+    parser.add_argument("--dbt-project-dir", default=None)
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Try to use an already-compiled manifest
-    existing = find_existing_manifest()
-    if existing:
-        print(f"Found existing manifest at {existing}, copying to {OUTPUT_FILE}")
-        shutil.copy2(existing, OUTPUT_FILE)
-
+    if fetch_from_dbt_cloud():
+        pass
+    elif copy_existing_manifest():
+        pass
     elif args.dbt_project_dir:
-        dbt_dir = Path(args.dbt_project_dir)
-        manifest_path = compile_dbt(dbt_dir)
-        shutil.copy2(manifest_path, OUTPUT_FILE)
-
+        compile_dbt(Path(args.dbt_project_dir))
     else:
-        # Try common default locations
-        for candidate_dir in [Path("dbt"), Path("/workspace/dbt")]:
-            if candidate_dir.exists():
-                manifest_path = compile_dbt(candidate_dir)
-                shutil.copy2(manifest_path, OUTPUT_FILE)
+        for candidate in [Path("dbt"), Path("/workspace/dbt")]:
+            if candidate.exists():
+                compile_dbt(candidate)
                 break
         else:
             print(
                 "ERROR: No dbt project found and no --dbt-project-dir supplied.\n"
-                "Either run `dbt compile` manually and place manifest.json at "
-                "dbt/target/manifest.json, or pass --dbt-project-dir.",
+                "Either set DBT_CLOUD_TOKEN + DBT_CLOUD_ACCOUNTID + DBT_CLOUD_JOB_ID,\n"
+                "run `dbt compile` and place manifest.json at dbt/target/manifest.json,\n"
+                "or pass --dbt-project-dir.",
                 file=sys.stderr,
             )
             sys.exit(1)
 
-    # Validate the manifest
-    with open(OUTPUT_FILE) as f:
+    with open(MANIFEST_OUT) as f:
         manifest = json.load(f)
-
     node_count = len(manifest.get("nodes", {}))
-    print(f"Manifest extracted successfully: {node_count} nodes → {OUTPUT_FILE}")
+    print(f"Manifest ready: {node_count} nodes → {MANIFEST_OUT}")
 
 
 if __name__ == "__main__":

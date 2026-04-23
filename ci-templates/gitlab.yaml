@@ -89,7 +89,10 @@ pulumi-apply-{@ ENV_NAME @}:
     PULUMI_CONFIG_PASSPHRASE: ""
     WORKSPACE: "{@ WORKSPACE_NAME @}"
 
-# ── Push: redeploy app via SSM (no SSH, no instance ID) ──────────────────────
+# ── Push: redeploy app via SSM when only app files changed ───────────────────
+# git pull + docker-compose up on the running instance (fast, no replacement).
+# Triggers on any repo change except pulumi/** — covers docker-compose, scripts,
+# blueprints, models, Dockerfiles, requirements, and any other app files.
 deploy-app-{@ ENV_NAME @}:
   stage: deploy
   image: python:3.11-slim
@@ -99,11 +102,6 @@ deploy-app-{@ ENV_NAME @}:
         - pulumi/**/*
       when: never
     - if: '$CI_COMMIT_BRANCH == "{@ ENV_NAME @}"'
-      changes:
-        - docker-compose.yml
-        - docker-compose.prod.yml
-        - blueprint/**/*
-        - model/**/*
   before_script:
     - pip install awscli
   script:
