@@ -163,9 +163,9 @@ ubuntu_ami = aws.ec2.get_ami(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Route53 self-registration block — built outside the f-string to avoid the
-# {{ collision between Python f-string escaping and Jinja2 template syntax
-# (both treat {{ as special). Plain string concat uses single { safely.
+# Route53 self-registration block — built outside the f-string using plain
+# string concat so single-brace JSON chars never collide with Jinja2 or
+# Python f-string escaping (both of which treat double-braces as special).
 # ─────────────────────────────────────────────────────────────────────────────
 if ec2_dns_name and ec2_dns_zone_id:
     _ip_meta = "local-ipv4" if alb_internal else "public-ipv4"
