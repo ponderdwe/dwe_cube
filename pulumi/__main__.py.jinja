@@ -222,6 +222,7 @@ REPO_URL="{{ git_repo_url }}"
 REPO_PATH=$(echo "$REPO_URL" | sed 's,https://,,')
 git clone "https://$GIT_USER:$GIT_TOKEN@$REPO_PATH" /home/ubuntu/cube
 git -C /home/ubuntu/cube checkout {git_branch}
+git -C /home/ubuntu/cube rev-parse HEAD > /home/ubuntu/cube/.schema-version
 
 # Write .env from all secret key=value pairs
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env

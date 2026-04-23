@@ -1,17 +1,29 @@
 // Cube.js configuration
 // Reference: https://cube.dev/docs/config
 
+const fs = require('fs');
+const path = require('path');
+
+const SCHEMA_VERSION_FILE = path.join(__dirname, '.schema-version');
+
+function getSchemaVersion() {
+  try {
+    return fs.readFileSync(SCHEMA_VERSION_FILE, 'utf8').trim();
+  } catch (err) {
+    return '1';
+  }
+}
+
 module.exports = {
   // Schema (model) directory — populated by dbt-cube-sync
-  schemaPath: "model",
+  schemaPath: "model/cubes",
 
   // Expose Postgres-compatible wire protocol on port 15432
   pgSqlPort: 15432,
 
-  // Cache schema version so Cube.js picks up schema changes automatically
-  schemaVersion: ({ authInfo }) => {
-    return process.env.CUBEJS_SCHEMA_VERSION || "1";
-  },
+  // Version written to .schema-version by EC2 bootstrap (git SHA) — forces
+  // cache invalidation on every deployment without a manual bump.
+  schemaVersion: () => getSchemaVersion(),
 
   // Query rewrite hook — add row-level security or tenant filtering here
   queryRewrite: (query, { authInfo }) => {

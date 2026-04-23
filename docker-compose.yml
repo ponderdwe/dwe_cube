@@ -231,6 +231,8 @@ services:
           --superset-password "$$SUPERSET_PASSWORD" \
           --cube-connection-name Cube \
           --rag-api-url http://fastapi:8080
+        echo 'Step 3: Bumping .schema-version so Cube.js reloads the schema...'
+        date -u +%Y%m%dT%H%M%SZ > .schema-version
     networks:
       - cube_network
     profiles:
