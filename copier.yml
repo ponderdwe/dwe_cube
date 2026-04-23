@@ -146,7 +146,6 @@ _exclude:
   - copier.yml          # don't copy Copier's own config into the client repo
   - README.md           # adapter README is not for client repos
   - .git
-  - .gitignore
   - .env                # never copy actual secrets
   - __pycache__
   - "*.pyc"

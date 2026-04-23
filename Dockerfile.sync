@@ -12,5 +12,8 @@ WORKDIR /workspace
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# sqlalchemy-redshift needs --no-deps to avoid downgrading SQLAlchemy
+RUN pip install --no-cache-dir --no-deps sqlalchemy-redshift
+
 # Default: shell (override via docker-compose command)
 CMD ["/bin/bash"]

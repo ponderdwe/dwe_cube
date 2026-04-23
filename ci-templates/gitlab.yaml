@@ -1,7 +1,7 @@
 # GitLab CI — two-path deploy for branch {@ ENV_NAME @} → workspace {@ WORKSPACE_NAME @}
 #
 # Path 1 — pulumi/** changed   → pulumi preview (MR) or pulumi up (push)
-# Path 2 — app files changed,  → SSM: git pull + docker-compose up (no SSH, no instance ID)
+# Path 2 — app files changed,  → ASG instance refresh (new instances pull latest code on boot)
 #           pulumi NOT changed
 #
 # Required CI/CD variables (repository secrets only):
@@ -89,8 +89,9 @@ pulumi-apply-{@ ENV_NAME @}:
     PULUMI_CONFIG_PASSPHRASE: ""
     WORKSPACE: "{@ WORKSPACE_NAME @}"
 
-# ── Push: redeploy app via SSM when only app files changed ───────────────────
-# git pull + docker-compose up on the running instance (fast, no replacement).
+# ── Push: redeploy app via ASG instance refresh when only app files changed ───
+# New instances boot from the launch template user_data (git clone + docker-compose up),
+# always pulling the latest code from the branch.
 # Triggers on any repo change except pulumi/** — covers docker-compose, scripts,
 # blueprints, models, Dockerfiles, requirements, and any other app files.
 deploy-app-{@ ENV_NAME @}:
@@ -103,26 +104,33 @@ deploy-app-{@ ENV_NAME @}:
       when: never
     - if: '$CI_COMMIT_BRANCH == "{@ ENV_NAME @}"'
   before_script:
-    - pip install awscli
+    - apt-get update -qq && apt-get install -y -qq curl unzip
+    - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
   script:
     - |
-      CMD_ID=$(aws ssm send-command \
-        --targets "Key=tag:Environment,Values={@ ENV_NAME @}" \
-        --document-name "AWS-RunShellScript" \
-        --parameters 'commands=["cd /home/ubuntu/cube && git pull && docker-compose -f docker-compose.yml up -d"]' \
-        --query "Command.CommandId" --output text)
-      echo "SSM Command: $CMD_ID"
-      for i in $(seq 1 30); do
-        STATUS=$(aws ssm list-command-invocations \
-          --command-id "$CMD_ID" \
-          --details \
-          --query "CommandInvocations[0].Status" --output text 2>/dev/null || echo Pending)
-        echo "  [$i] $STATUS"
+      ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
+        --filters \
+          "Name=tag:Environment,Values={@ ENV_NAME @}" \
+          "Name=tag:ManagedBy,Values=Pulumi" \
+        --query "AutoScalingGroups[0].AutoScalingGroupName" --output text)
+      echo "Starting instance refresh for ASG: $ASG_NAME"
+      aws autoscaling start-instance-refresh \
+        --auto-scaling-group-name "$ASG_NAME" \
+        --strategy Rolling \
+        --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":300}' 2>&1 || true
+      echo "Waiting for instance refresh..."
+      for i in $(seq 1 40); do
+        STATUS=$(aws autoscaling describe-instance-refreshes \
+          --auto-scaling-group-name "$ASG_NAME" \
+          --query "InstanceRefreshes[0].Status" --output text 2>/dev/null || echo "Pending")
+        echo "  [$i/40] $STATUS"
         case "$STATUS" in
-          Success) break ;;
-          Failed|Cancelled|TimedOut) echo "Deploy $STATUS"; exit 1 ;;
+          Successful) echo "Instance refresh completed."; break ;;
+          Failed|Cancelled) echo "Instance refresh $STATUS"; exit 1 ;;
         esac
-        sleep 10
+        [ "$i" -eq 40 ] && { echo "Timeout waiting for instance refresh"; exit 1; }
+        sleep 30
       done
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
