@@ -49,14 +49,34 @@ pulumi-apply-{@ ENV_NAME @}:
       changes:
         - pulumi/**/*
   before_script:
-    - apt-get update -qq && apt-get install -y -qq curl
+    - apt-get update -qq && apt-get install -y -qq curl unzip
     - curl -fsSL https://get.pulumi.com | sh
     - pip install -r pulumi/requirements.txt
+    - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
   script:
     - export PATH="$HOME/.pulumi/bin:$PATH"
     - pulumi login $PULUMI_S3_STATE
     - cd pulumi && (pulumi stack select $WORKSPACE 2>/dev/null || pulumi stack init $WORKSPACE)
+    # Bump startup_code_version so every push creates a new launch template version
+    # and triggers an ASG instance refresh (via triggers=["launch_template"] in __main__.py).
+    - pulumi config set startup_code_version "$CI_COMMIT_SHA" --stack $WORKSPACE
     - pulumi up --yes --stack $WORKSPACE
+    - |
+      ASG_NAME=$(pulumi stack output asg_name --stack $WORKSPACE)
+      echo "Waiting for ASG instance refresh: $ASG_NAME"
+      for i in $(seq 1 40); do
+        STATUS=$(aws autoscaling describe-instance-refreshes \
+          --auto-scaling-group-name "$ASG_NAME" \
+          --query "InstanceRefreshes[0].Status" --output text 2>/dev/null || echo "Pending")
+        echo "  [$i/40] $STATUS"
+        case "$STATUS" in
+          Successful) echo "Instance refresh completed."; break ;;
+          Failed|Cancelled) echo "Instance refresh $STATUS"; exit 1 ;;
+        esac
+        [ "$i" -eq 40 ] && { echo "Timeout waiting for instance refresh"; exit 1; }
+        sleep 30
+      done
   variables:
     AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY

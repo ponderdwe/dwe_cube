@@ -78,18 +78,51 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: {@ AWS_REGION @}
       - run: pip install -r requirements.txt
         working-directory: pulumi
-      - uses: pulumi/actions@v5
-        with:
-          command: up
-          stack-name: ${{ env.WORKSPACE }}
-          work-dir: pulumi
+      - name: Install Pulumi CLI
+        run: curl -fsSL https://get.pulumi.com | sh && echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+      - name: Pulumi login
+        run: pulumi login $PULUMI_BACKEND_URL
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: {@ AWS_REGION @}
+          PULUMI_CONFIG_PASSPHRASE: ""
+      - name: Bump startup_code_version and deploy
+        # Setting startup_code_version to the git SHA ensures a new launch template
+        # version is created on every push, which triggers an ASG instance refresh
+        # (via triggers=["launch_template"] in the Pulumi stack).
+        run: |
+          cd pulumi
+          pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || pulumi stack init ${{ env.WORKSPACE }}
+          pulumi config set startup_code_version "${{ github.sha }}" --stack ${{ env.WORKSPACE }}
+          pulumi up --yes --stack ${{ env.WORKSPACE }}
+        env:
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
+          PULUMI_CONFIG_PASSPHRASE: ""
+      - name: Wait for ASG instance refresh
+        run: |
+          ASG_NAME=$(cd pulumi && pulumi stack output asg_name --stack ${{ env.WORKSPACE }})
+          echo "Waiting for ASG instance refresh: $ASG_NAME"
+          for i in $(seq 1 40); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --query "InstanceRefreshes[0].Status" --output text 2>/dev/null || echo "Pending")
+            echo "  [$i/40] $STATUS"
+            case "$STATUS" in
+              Successful) echo "Instance refresh completed."; break ;;
+              Failed|Cancelled) echo "Instance refresh $STATUS"; exit 1 ;;
+            esac
+            [ "$i" -eq 40 ] && { echo "Timeout waiting for instance refresh"; exit 1; }
+            sleep 30
+          done
+        env:
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
+          PULUMI_CONFIG_PASSPHRASE: ""
 
   # ── Push: redeploy app via SSM (no SSH, no instance ID) ───────────────────
   deploy-app:

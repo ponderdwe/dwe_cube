@@ -21,10 +21,12 @@ config = pulumi.Config()
 env          = config.require("environment")
 git_branch   = config.require("git_branch")
 secret_id    = config.require("secret_id")
-instance_type = config.get("instance_type") or "t3.xlarge"
-volume_size  = int(config.get("volume_size") or "100")
-aws_region   = config.get("aws_region") or "us-east-1"
-app_port     = int(config.get("app_port") or "4000")
+instance_type        = config.get("instance_type") or "t3.xlarge"
+volume_size          = int(config.get("volume_size") or "100")
+aws_region           = config.get("aws_region") or "us-east-1"
+app_port             = int(config.get("app_port") or "4000")
+# Bump this in CI (e.g. git SHA) to force a new launch template version and trigger instance refresh
+startup_code_version = config.get("startup_code_version") or ""
 
 project_name = "{{ project_name }}"
 suffix = f"-{env}" if env != "prod" else ""
@@ -90,6 +92,17 @@ instance_role = aws.iam.Role(
 aws.iam.RolePolicyAttachment(f"{project_name}-ssm{suffix}",     role=instance_role.name, policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore")
 aws.iam.RolePolicyAttachment(f"{project_name}-bedrock{suffix}", role=instance_role.name, policy_arn="arn:aws:iam::aws:policy/AmazonBedrockFullAccess")
 aws.iam.RolePolicyAttachment(f"{project_name}-sm{suffix}",      role=instance_role.name, policy_arn="arn:aws:iam::aws:policy/SecretsManagerReadWrite")
+if ec2_dns_zone_id:
+    # Allow instance to update its own Route53 A record on boot (handles post-refresh IP changes)
+    aws.iam.RolePolicy(
+        f"{project_name}-r53{suffix}",
+        role=instance_role.name,
+        policy=json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": ["route53:ChangeResourceRecordSets"],
+                           "Resource": f"arn:aws:route53:::hostedzone/{ec2_dns_zone_id}"}],
+        }),
+    )
 instance_profile = aws.iam.InstanceProfile(
     f"{project_name}-profile{suffix}", name=f"{project_name}-profile{suffix}",
     role=instance_role.name, tags=tags,
@@ -156,6 +169,8 @@ user_data_script = f"""#!/bin/bash
 set -e
 exec > >(tee /var/log/cube-init.log | logger -t cube-init) 2>&1
 
+# startup_code_version={startup_code_version}
+
 apt-get update -y
 apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common git jq unzip
 
@@ -187,6 +202,34 @@ git -C /home/ubuntu/cube checkout {git_branch}
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
 
 cd /home/ubuntu/cube && docker-compose up -d
+
+# Self-register EC2 DNS in Route53 — runs on every boot so IP is always current after instance refresh
+if [ -n "{ec2_dns_name}" ] && [ -n "{ec2_dns_zone_id}" ]; then
+    if [ "{alb_internal}" = "True" ]; then
+        EC2_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+    else
+        EC2_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+    fi
+    cat > /tmp/r53-change.json <<'R53EOF'
+{{
+  "Changes": [{{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {{
+      "Name": "{ec2_dns_name}",
+      "Type": "A",
+      "TTL": 60,
+      "ResourceRecords": [{{"Value": "PLACEHOLDER"}}]
+    }}
+  }}]
+}}
+R53EOF
+    sed -i "s/PLACEHOLDER/$EC2_IP/" /tmp/r53-change.json
+    aws route53 change-resource-record-sets \
+        --hosted-zone-id {ec2_dns_zone_id} \
+        --region {aws_region} \
+        --change-batch file:///tmp/r53-change.json || echo "WARNING: Route53 update failed — check IAM permissions"
+    rm -f /tmp/r53-change.json
+fi
 """
 user_data = base64.b64encode(user_data_script.encode()).decode()
 
@@ -288,6 +331,7 @@ asg = aws.autoscaling.Group(
     health_check_grace_period=600,
     instance_refresh=aws.autoscaling.GroupInstanceRefreshArgs(
         strategy="Rolling",
+        triggers=["launch_template"],  # auto-refresh when launch template version changes
         preferences=aws.autoscaling.GroupInstanceRefreshPreferencesArgs(
             min_healthy_percentage=0,
             instance_warmup=300,
@@ -309,28 +353,12 @@ aws.route53.Record(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Route53 — A record → EC2 instance IP (optional, for direct SSH access)
+# Route53 — EC2 A record is managed by the instance itself (see user_data above).
+# Self-registration via `aws route53 change-resource-record-sets` runs on every
+# boot, so the record stays accurate after instance refresh without needing
+# another `pulumi up`. The EC2 IAM role has ChangeResourceRecordSets permission
+# for this hosted zone (see r53 RolePolicy above).
 # ─────────────────────────────────────────────────────────────────────────────
-if ec2_dns_zone_id and ec2_dns_name:
-    asg_instances = aws.ec2.get_instances_output(
-        filters=[aws.ec2.GetInstancesFilterArgs(
-            name="tag:aws:autoscaling:groupName",
-            values=[asg.name],
-        )],
-        instance_state_names=["running", "pending"],
-    )
-    if alb_internal:
-        ec2_ip = asg_instances.private_ips.apply(lambda ips: ips[0])
-    else:
-        ec2_ip = asg_instances.public_ips.apply(lambda ips: ips[0])
-    aws.route53.Record(
-        f"{project_name}-ec2-dns{suffix}",
-        zone_id=ec2_dns_zone_id,
-        name=ec2_dns_name,
-        type="A",
-        ttl=60,
-        records=[ec2_ip],
-    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
