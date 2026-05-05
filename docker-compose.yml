@@ -174,7 +174,9 @@ services:
       milvus-minio:
         condition: service_healthy
     networks:
-      - cube_network
+      cube_network:
+        aliases:
+          - milvus-standalone
 
   # ── RAG FastAPI service ────────────────────────────────────────
   fastapi:
