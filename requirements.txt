@@ -2,7 +2,7 @@
 # Used by the dbt-cube-sync Docker service
 
 # DBT → Cube → Superset sync
-dbt-cube-sync==0.1.0a31
+dbt-cube-sync==0.1.0a35
 
 # Database drivers (add the one matching your warehouse)
 psycopg2-binary>=2.9.9        # PostgreSQL / Redshift
