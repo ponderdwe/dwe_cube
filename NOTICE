@@ -1,0 +1,15 @@
+DWE Cube
+Copyright 2026 Ponder
+
+This product includes software developed at Ponder (https://ponder.co).
+
+This product depends on third-party software with the following licenses:
+
+  Cube.js              Apache 2.0   https://github.com/cube-js/cube
+  dbt-core             Apache 2.0   https://github.com/dbt-labs/dbt-core
+  Apache Superset      Apache 2.0   https://github.com/apache/superset
+  Pulumi               Apache 2.0   https://github.com/pulumi/pulumi
+  boto3                Apache 2.0   https://github.com/boto/boto3
+  requests             Apache 2.0   https://github.com/psf/requests
+  python-dotenv        BSD 3-Clause https://github.com/theskumar/python-dotenv
+  psycopg2             LGPL         https://github.com/psycopg/psycopg2
