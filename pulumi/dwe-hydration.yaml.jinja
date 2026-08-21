@@ -1,0 +1,8 @@
+adapter_name: {{ adapter_name }}
+project_name: {{ project_name }}
+git_repo_url: {{ git_repo_url }}
+adapter_version: {{ adapter_version }}
+environments:
+{% for env in environments %}
+  - {{ env }}
+{% endfor %}

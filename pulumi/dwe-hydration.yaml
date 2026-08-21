@@ -1,0 +1,6 @@
+adapter_name: dwe_cube
+project_name: local-cube
+git_repo_url: https://github.com/ponderdwe/dwe_cube
+adapter_version: local
+environments:
+  - development

@@ -9,10 +9,20 @@ Run with: pulumi stack select prod && pulumi up --yes
 
 import base64
 import json
+from pathlib import Path
 
 import boto3  # used only by Pulumi at deploy time (not EC2 bootstrap)
 import pulumi
 import pulumi_aws as aws
+import yaml
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hydration config — written by dwe-core at create-service / update-service time
+# ─────────────────────────────────────────────────────────────────────────────
+_dwe = yaml.safe_load((Path(__file__).parent / "dwe-hydration.yaml").read_text())
+project_name    = _dwe["project_name"]
+git_repo_url    = _dwe["git_repo_url"]
+adapter_version = _dwe["adapter_version"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stack Config
@@ -28,7 +38,6 @@ app_port             = int(config.get("app_port") or "4000")
 # Bump this in CI (e.g. git SHA) to force a new launch template version and trigger instance refresh
 startup_code_version = config.get("startup_code_version") or ""
 
-project_name = "{{ project_name }}"
 suffix = f"-{env}" if env != "prod" else ""
 tags = {
     "Project":     project_name,
@@ -164,8 +173,8 @@ ubuntu_ami = aws.ec2.get_ami(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Route53 self-registration block — built outside the f-string using plain
-# string concat so single-brace JSON chars never collide with Jinja2 or
-# Python f-string escaping (both of which treat double-braces as special).
+# string concat so single-brace JSON chars don't collide with Python f-string
+# escaping (double-braces are treated as special).
 # ─────────────────────────────────────────────────────────────────────────────
 if ec2_dns_name and ec2_dns_zone_id:
     _ip_meta = "local-ipv4" if alb_internal else "public-ipv4"
@@ -218,7 +227,7 @@ GIT_USER=$(echo "$SECRET_JSON" | jq -r '.git_deploy_username // "x-token-auth"')
 GIT_TOKEN=$(echo "$SECRET_JSON" | jq -r '.git_deploy_token')
 
 # Clone repo with credentials injected into URL
-REPO_URL="{{ git_repo_url }}"
+REPO_URL="{git_repo_url}"
 REPO_PATH=$(echo "$REPO_URL" | sed 's,https://,,')
 git clone "https://$GIT_USER:$GIT_TOKEN@$REPO_PATH" /home/ubuntu/cube
 git -C /home/ubuntu/cube checkout {git_branch}
@@ -356,6 +365,73 @@ aws.route53.Record(
 # another `pulumi up`. The EC2 IAM role has ChangeResourceRecordSets permission
 # for this hosted zone (see r53 RolePolicy above).
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KG Phase 2 — register deployed services with the Deploy Management API.
+# No-op when KG_API_HOST / KG_API_TOKEN absent or kg_mappings not in dwe-hydration.yaml.
+# dwe-core writes kg_mappings into dwe-hydration.yaml at create-service time
+# (_inject_kg_registration). This block is static Python; nothing is injected here.
+# ─────────────────────────────────────────────────────────────────────────────
+_kg_host     = secrets.get("KG_API_HOST", "")
+_kg_token    = secrets.get("KG_API_TOKEN", "")
+_kg_mappings = _dwe.get("kg_mappings")
+
+if _kg_host and _kg_token and _kg_mappings:
+    import httpx as _httpx
+    import warnings as _warnings
+
+    _adapter_name  = _kg_mappings["adapter_name"]
+    _kg_props_keys = _kg_mappings.get("kg_adapter_properties", {})  # {prop: SECRET_KEY}
+    _kg_outputs    = _kg_mappings.get("kg_pulumi_outputs", {})       # {alias: export_name}
+    _kg_services   = _kg_mappings.get("services", [])
+
+    # Map export names referenced in kg_pulumi_outputs to their pulumi.Output objects
+    _pulumi_export_map = {
+        "alb_dns":  alb.dns_name,
+        "url":      pulumi.Output.from_input(f"https://{dns_name}"),
+        "asg_name": asg.name,
+    }
+    _out_names = list(_kg_outputs.keys())
+    _out_vals  = [_pulumi_export_map[_kg_outputs[n]] for n in _out_names]
+
+    def _phase2_hydrate(*resolved):
+        props = dict(zip(_out_names, resolved))
+        for prop, secret_key in _kg_props_keys.items():
+            props[prop] = secrets.get(secret_key, "")
+
+        _headers = {"Authorization": f"Bearer {_kg_token}"}
+        _base    = _kg_host.rstrip("/")
+        try:
+            _httpx.patch(
+                f"{_base}/adapters/{_adapter_name}/{env}",
+                json={"properties": props},
+                headers=_headers,
+                timeout=10,
+            )
+        except Exception as _exc:
+            _warnings.warn(f"[dwe-kg] PATCH /adapters failed: {_exc}")
+
+        # Only register services whose trigger_secret is present in secrets
+        _svc_payloads = []
+        for _svc in _kg_services:
+            _trigger = _svc.get("trigger_secret", "")
+            if _trigger and not secrets.get(_trigger):
+                continue
+            _svc_props = {p: secrets.get(sk, "") for p, sk in _svc.get("properties", {}).items()}
+            _svc_payloads.append({"name": _svc["name"], "properties": _svc_props})
+
+        if _svc_payloads:
+            try:
+                _httpx.post(
+                    f"{_base}/adapters/{_adapter_name}/{env}/services",
+                    json={"services": _svc_payloads},
+                    headers=_headers,
+                    timeout=10,
+                )
+            except Exception as _exc:
+                _warnings.warn(f"[dwe-kg] POST /services failed: {_exc}")
+
+    pulumi.Output.all(*_out_vals).apply(_phase2_hydrate)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
