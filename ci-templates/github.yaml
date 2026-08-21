@@ -1,16 +1,22 @@
 # GitHub Actions — two-path deploy for branch {@ ENV_NAME @} → workspace {@ WORKSPACE_NAME @}
 #
 # Path 1 — pulumi/** changed   → pulumi preview (PR) or pulumi up (push)
-# Path 2 — app files changed,  → SSM: git pull + docker-compose up (no SSH, no instance ID)
+# Path 2 — app files changed,  → instance refresh / VMSS reimage
 #           pulumi NOT changed
 #
-# Required repository secrets (CI only):
-#   AWS_ACCESS_KEY_ID      — AWS credentials for Pulumi + SSM
-#   AWS_SECRET_ACCESS_KEY  — AWS credentials for Pulumi + SSM
+# Required repository secrets:
+{% if CLOUD_PROVIDER == "azure" %}
+#   AZURE_CLIENT_ID        — Service principal client ID
+#   AZURE_CLIENT_SECRET    — Service principal secret
+#   AZURE_TENANT_ID        — Azure AD tenant ID
+#   AZURE_SUBSCRIPTION_ID  — Azure subscription ID
+#   PULUMI_AZURE_STATE     — Azure Blob Storage URL for Pulumi state
+#   RESOURCE_GROUP         — Azure resource group containing the VMSS
+{% else %}
+#   AWS_ACCESS_KEY_ID      — AWS credentials for Pulumi + ASG
+#   AWS_SECRET_ACCESS_KEY  — AWS credentials for Pulumi + ASG
 #   PULUMI_S3_STATE        — S3 backend URL, e.g. s3://my-pulumi-state-bucket
-#
-# All application secrets live in AWS Secrets Manager: DWE_DEPLOY_CUBE (or DWE_DEPLOY_CUBE_{ENV})
-# Pulumi reads that secret at deploy time; the EC2 instance pulls it on first boot.
+{% endif %}
 
 name: Deploy — {@ ENV_NAME @}
 
@@ -21,7 +27,6 @@ on:
     branches: ["{@ ENV_NAME @}"]
 
 env:
-  AWS_REGION: {@ AWS_REGION @}
   WORKSPACE: {@ WORKSPACE_NAME @}
   SM_SECRET: {@ SECRET_NAME @}
 
@@ -55,6 +60,25 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
         working-directory: pulumi
+{% if CLOUD_PROVIDER == "azure" %}
+      - uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+      - name: Install Pulumi CLI
+        run: curl -fsSL https://get.pulumi.com | sh && echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+      - uses: pulumi/actions@v5
+        with:
+          command: preview
+          stack-name: ${{ env.WORKSPACE }}
+          work-dir: pulumi
+        env:
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_AZURE_STATE }}
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          PULUMI_CONFIG_PASSPHRASE: ""
+{% else %}
       - uses: pulumi/actions@v5
         with:
           command: preview
@@ -65,6 +89,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: {@ AWS_REGION @}
+{% endif %}
 
   # ── Push: apply infra changes ──────────────────────────────────────────────
   pulumi-apply:
@@ -76,24 +101,61 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - run: pip install -r requirements.txt
+        working-directory: pulumi
+      - name: Install Pulumi CLI
+        run: curl -fsSL https://get.pulumi.com | sh && echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+{% if CLOUD_PROVIDER == "azure" %}
+      - uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+      - name: Pulumi login
+        run: pulumi login ${{ secrets.PULUMI_AZURE_STATE }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ""
+      - name: Bump startup_code_version and deploy
+        run: |
+          cd pulumi
+          pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || pulumi stack init ${{ env.WORKSPACE }}
+          pulumi config set startup_code_version "${{ github.sha }}" --stack ${{ env.WORKSPACE }}
+          pulumi up --yes --stack ${{ env.WORKSPACE }}
+        env:
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_AZURE_STATE }}
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          PULUMI_CONFIG_PASSPHRASE: ""
+      - name: Reimage VMSS and wait
+        run: |
+          VMSS_NAME=$(az vmss list --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
+          echo "Reimaging VMSS: $VMSS_NAME"
+          az vmss reimage --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME --no-wait || true
+          echo "Waiting for VMSS instances to be running..."
+          for i in $(seq 1 40); do
+            STATUS=$(az vmss list-instances --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME \
+              --query "[0].provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+            echo "  [$i/40] $STATUS"
+            case "$STATUS" in
+              Succeeded) echo "VMSS instance ready."; break ;;
+              Failed) echo "VMSS instance failed"; exit 1 ;;
+            esac
+            [ "$i" -eq 40 ] && { echo "Timeout waiting for VMSS instance"; exit 1; }
+            sleep 30
+          done
+{% else %}
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: {@ AWS_REGION @}
-      - run: pip install -r requirements.txt
-        working-directory: pulumi
-      - name: Install Pulumi CLI
-        run: curl -fsSL https://get.pulumi.com | sh && echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
       - name: Pulumi login
         run: pulumi login $PULUMI_BACKEND_URL
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
           PULUMI_CONFIG_PASSPHRASE: ""
       - name: Bump startup_code_version and deploy
-        # Setting startup_code_version to the git SHA ensures a new launch template
-        # version is created on every push, which triggers an ASG instance refresh
-        # (via triggers=["launch_template"] in the Pulumi stack).
         run: |
           cd pulumi
           pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || pulumi stack init ${{ env.WORKSPACE }}
@@ -126,9 +188,9 @@ jobs:
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
           PULUMI_CONFIG_PASSPHRASE: ""
+{% endif %}
 
-  # ── Push: redeploy app via SSM when only app files changed ───────────────────
-  # git pull + docker-compose up on the running instance (fast, no replacement).
+  # ── Push: redeploy app when only app files changed ─────────────────────────
   deploy-app:
     needs: detect-changes
     if: >
@@ -137,16 +199,39 @@ jobs:
       needs.detect-changes.outputs.infra != 'true'
     runs-on: ubuntu-latest
     steps:
+{% if CLOUD_PROVIDER == "azure" %}
+      - uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+      - name: Reimage VMSS and wait
+        run: |
+          VMSS_NAME=$(az vmss list --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
+          echo "Reimaging VMSS: $VMSS_NAME"
+          az vmss reimage --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME --no-wait || true
+          echo "Waiting for VMSS instances to be running..."
+          for i in $(seq 1 40); do
+            STATUS=$(az vmss list-instances --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME \
+              --query "[0].provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+            echo "  [$i/40] $STATUS"
+            case "$STATUS" in
+              Succeeded) echo "VMSS instance ready."; break ;;
+              Failed) echo "VMSS instance failed"; exit 1 ;;
+            esac
+            [ "$i" -eq 40 ] && { echo "Timeout waiting for VMSS instance"; exit 1; }
+            sleep 30
+          done
+{% else %}
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: {@ AWS_REGION @}
-
       - name: Start and wait for ASG instance refresh
         run: |
           ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
             --filters \
+              "Name=tag:Project,Values={@ PROJECT_NAME @}" \
               "Name=tag:Environment,Values={@ WORKSPACE_NAME @}" \
               "Name=tag:ManagedBy,Values=Pulumi" \
             --query "AutoScalingGroups[0].AutoScalingGroupName" --output text)
@@ -168,3 +253,4 @@ jobs:
             [ "$i" -eq 40 ] && { echo "Timeout waiting for instance refresh"; exit 1; }
             sleep 30
           done
+{% endif %}

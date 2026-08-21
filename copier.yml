@@ -24,6 +24,7 @@ _dwe_hub:
     - gitlab
   cloud_providers:
     - aws
+    - azure
   services:
     - name: CubeJS
       description: "Semantic layer — REST / GraphQL / WebSocket API over your data warehouse"
@@ -230,6 +231,21 @@ environments:
   type: yaml
   default: "[dev, prod]"
   help: "List of deployment environments (each gets its own Pulumi stack and CI job)"
+
+cloud_provider:
+  type: str
+  default: aws
+  choices:
+    - aws
+    - azure
+  help: "Cloud provider for infrastructure deployment"
+  when: false   # always set programmatically by dwe CLI
+
+azure_location:
+  type: str
+  default: eastus
+  help: "Azure region where infrastructure is provisioned (only used when cloud_provider=azure)"
+  when: false   # always set programmatically by dwe CLI
 
 aws_region:
   type: str

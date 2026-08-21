@@ -4,4 +4,8 @@ config:
   {{ project_name }}:secret_id: {{ secret_id }}_dev
   {{ project_name }}:instance_type: t3.large
   {{ project_name }}:volume_size: "50"
+{% if cloud_provider == "azure" %}
+  {{ project_name }}:azure_location: {{ azure_location }}
+{% else %}
   {{ project_name }}:aws_region: {{ aws_region }}
+{% endif %}
