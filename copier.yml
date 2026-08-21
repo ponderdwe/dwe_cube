@@ -74,19 +74,45 @@ _dwe_hub:
   # Pulumi reads ALL runtime config from DWE_DEPLOY_CUBE at deploy time.
   # CI only needs AWS credentials to run Pulumi and manage the autoscaling group via SSM.
   required_secrets:
-    # ── CI secrets (GitHub / GitLab repository secrets) ──────────────────────
-    # Only AWS credentials are needed in CI.  Pulumi state lives in S3 (no
-    # Pulumi SaaS token).  App redeployment uses SSM Run Command targeting
-    # instances by environment tag — no SSH, no hard-coded instance IDs.
+    # ── CI secrets: AWS (GitHub / GitLab repository secrets) ─────────────────
     - key: AWS_ACCESS_KEY_ID
-      description: "AWS access key — Pulumi uses this to provision infrastructure and SSM to redeploy the app"
+      description: "AWS access key — Pulumi uses this to provision infrastructure and trigger ASG instance refresh (AWS only)"
       destination: ci
+      cloud_provider: aws
     - key: AWS_SECRET_ACCESS_KEY
-      description: "AWS secret key"
+      description: "AWS secret key (AWS only)"
       destination: ci
+      cloud_provider: aws
     - key: PULUMI_S3_STATE
-      description: "S3 URL for Pulumi state backend, e.g. s3://my-pulumi-state-bucket"
+      description: "S3 URL for Pulumi state backend, e.g. s3://my-pulumi-state-bucket (AWS only)"
       destination: ci
+      cloud_provider: aws
+
+    # ── CI secrets: Azure (GitHub / GitLab repository secrets) ───────────────
+    - key: AZURE_CLIENT_ID
+      description: "Service principal client ID — Pulumi uses this to provision Azure infrastructure (Azure only)"
+      destination: ci
+      cloud_provider: azure
+    - key: AZURE_CLIENT_SECRET
+      description: "Service principal client secret (Azure only)"
+      destination: ci
+      cloud_provider: azure
+    - key: AZURE_TENANT_ID
+      description: "Azure AD tenant ID (Azure only)"
+      destination: ci
+      cloud_provider: azure
+    - key: AZURE_SUBSCRIPTION_ID
+      description: "Azure subscription ID (Azure only)"
+      destination: ci
+      cloud_provider: azure
+    - key: PULUMI_AZURE_STATE
+      description: "Azure Blob Storage URL for Pulumi state backend, e.g. azblob://my-state-container (Azure only)"
+      destination: ci
+      cloud_provider: azure
+    - key: RESOURCE_GROUP
+      description: "Azure resource group name — used by CI to look up the VMSS by tags (Azure only)"
+      destination: ci
+      cloud_provider: azure
 
     # ── AWS Secrets Manager: DWE_DEPLOY_CUBE (or DWE_DEPLOY_CUBE_dev) ────────
     - key: ROUTE53_ZONE_ID
