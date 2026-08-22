@@ -10,7 +10,8 @@
 #   AZURE_CLIENT_SECRET    — Service principal secret
 #   AZURE_TENANT_ID        — Azure AD tenant ID
 #   AZURE_SUBSCRIPTION_ID  — Azure subscription ID
-#   PULUMI_AZURE_STATE     — Azure Blob Storage URL for Pulumi state
+#   AZURE_STORAGE_ACCOUNT  — Storage account name for Pulumi state backend
+#   PULUMI_AZURE_STATE     — Azure Blob Storage URL, e.g. azblob://container-name
 #   RESOURCE_GROUP         — Azure resource group containing the VMSS
 {% else %}
 #   AWS_ACCESS_KEY_ID      — AWS credentials for Pulumi + ASG
@@ -72,6 +73,7 @@ jobs:
       - name: Pulumi login
         run: pulumi login ${{ secrets.PULUMI_AZURE_STATE }}
         env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           PULUMI_CONFIG_PASSPHRASE: ""
       - uses: pulumi/actions@v5
         with:
@@ -80,6 +82,7 @@ jobs:
           work-dir: pulumi
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_AZURE_STATE }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -130,6 +133,7 @@ jobs:
       - name: Pulumi login
         run: pulumi login ${{ secrets.PULUMI_AZURE_STATE }}
         env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           PULUMI_CONFIG_PASSPHRASE: ""
       - name: Bump startup_code_version and deploy
         run: |
@@ -139,6 +143,7 @@ jobs:
           pulumi up --yes --stack ${{ env.WORKSPACE }}
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_AZURE_STATE }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}

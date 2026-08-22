@@ -105,6 +105,10 @@ _dwe_hub:
       description: "Azure subscription ID (Azure only)"
       destination: ci
       cloud_provider: azure
+    - key: AZURE_STORAGE_ACCOUNT
+      description: "Azure Storage Account name that hosts the Pulumi state container (Azure only)"
+      destination: ci
+      cloud_provider: azure
     - key: PULUMI_AZURE_STATE
       description: "Azure Blob Storage URL for Pulumi state backend, e.g. azblob://my-state-container (Azure only)"
       destination: ci
