@@ -43,6 +43,7 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          token: ""
           filters: |
             infra:
               - 'pulumi/**'
