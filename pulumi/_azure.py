@@ -90,18 +90,20 @@ identity = azure_native.managedidentity.UserAssignedIdentity(
     tags=tags,
 )
 
-# Key Vault access policy for the Managed Identity (GET secrets)
-kv_access = azure_native.keyvault.AccessPolicy(
-    f"{project_name}-kv-policy{suffix}",
-    resource_group_name=resource_group,
-    vault_name=key_vault_name,
-    access_policy=azure_native.keyvault.AccessPolicyEntryArgs(
-        tenant_id=identity.tenant_id,
-        object_id=identity.principal_id,
-        permissions=azure_native.keyvault.PermissionsArgs(
-            secrets=["get", "list"],
-        ),
+# Key Vault Secrets User role assignment for the Managed Identity (RBAC-enabled vault)
+# Role: Key Vault Secrets User (4633458b-17de-408a-b874-0445c86b69e6)
+kv_access = azure_native.authorization.RoleAssignment(
+    f"{project_name}-kv-role{suffix}",
+    scope=pulumi.Output.format(
+        "/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.KeyVault/vaults/{2}",
+        subscription_id, resource_group, key_vault_name,
     ),
+    role_definition_id=pulumi.Output.format(
+        "/subscriptions/{0}/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6",
+        subscription_id,
+    ),
+    principal_id=identity.principal_id,
+    principal_type="ServicePrincipal",
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
