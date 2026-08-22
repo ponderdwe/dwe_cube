@@ -70,8 +70,15 @@ jobs:
           creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
       - name: Install Pulumi CLI
         run: curl -fsSL https://get.pulumi.com | sh && echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
-      - name: Init stack if needed
-        run: pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || pulumi stack init ${{ env.WORKSPACE }}
+      - name: Init stack and set config
+        run: |
+          pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || pulumi stack init ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:environment ${{ env.WORKSPACE }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:git_branch {@ ENV_NAME @} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:secret_id ${{ env.SM_SECRET }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:key_vault_name ${{ secrets.KEY_VAULT_NAME }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:resource_group ${{ secrets.RESOURCE_GROUP }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:subscription_id ${{ secrets.AZURE_SUBSCRIPTION_ID }} --stack ${{ env.WORKSPACE }}
         working-directory: pulumi
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_AZURE_STATE }}
@@ -138,12 +145,18 @@ jobs:
         env:
           AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           PULUMI_CONFIG_PASSPHRASE: ""
-      - name: Bump startup_code_version and deploy
+      - name: Init stack and set config
         run: |
-          cd pulumi
           pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || pulumi stack init ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:environment ${{ env.WORKSPACE }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:git_branch {@ ENV_NAME @} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:secret_id ${{ env.SM_SECRET }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:key_vault_name ${{ secrets.KEY_VAULT_NAME }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:resource_group ${{ secrets.RESOURCE_GROUP }} --stack ${{ env.WORKSPACE }}
+          pulumi config set cube-deploy:subscription_id ${{ secrets.AZURE_SUBSCRIPTION_ID }} --stack ${{ env.WORKSPACE }}
           pulumi config set startup_code_version "${{ github.sha }}" --stack ${{ env.WORKSPACE }}
           pulumi up --yes --stack ${{ env.WORKSPACE }}
+        working-directory: pulumi
         env:
           PULUMI_BACKEND_URL: ${{ secrets.PULUMI_AZURE_STATE }}
           AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}

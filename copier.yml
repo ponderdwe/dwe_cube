@@ -110,11 +110,15 @@ _dwe_hub:
       destination: ci
       cloud_provider: azure
     - key: PULUMI_AZURE_STATE
-      description: "Azure Blob Storage URL for Pulumi state backend, e.g. azblob://my-state-container (Azure only)"
+      description: "Azure Blob Storage URL for Pulumi state backend, e.g. azblob://deploy-state/cube-state (Azure only)"
       destination: ci
       cloud_provider: azure
     - key: RESOURCE_GROUP
-      description: "Azure resource group name — used by CI to look up the VMSS by tags (Azure only)"
+      description: "Azure resource group name where infrastructure is deployed (Azure only)"
+      destination: ci
+      cloud_provider: azure
+    - key: KEY_VAULT_NAME
+      description: "Azure Key Vault name holding the DWE_DEPLOY_CUBE secret with all runtime config (Azure only)"
       destination: ci
       cloud_provider: azure
 
