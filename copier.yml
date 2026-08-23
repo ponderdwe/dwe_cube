@@ -285,23 +285,30 @@ aws_region:
   type: str
   default: us-east-1
   help: "AWS region where infrastructure is provisioned"
+  x_dwe_editable: true
+  x_dwe_per_env: false
 
 instance_type:
   type: str
   default: t3.xlarge
   help: >
-    EC2 instance type. Cube.js + CubeStore + Milvus are memory-intensive.
-    Minimum recommended: t3.large. Production: t3.xlarge or r6i.large.
+    VM instance size. Cube.js + CubeStore + Milvus are memory-intensive.
+    AWS: t3.xlarge or r6i.large. Azure: Standard_D4s_v6 or Standard_E4s_v6.
+  x_dwe_editable: true
+  x_dwe_per_env: true
 
 volume_size:
   type: int
   default: 100
-  help: "EBS root volume size in GB. Milvus vector index can grow large."
+  help: "Root volume size in GB. Milvus vector index can grow large."
+  x_dwe_editable: true
+  x_dwe_per_env: true
 
 secret_id:
   type: str
   default: "DWE_DEPLOY_CUBE"
   help: >
-    AWS Secrets Manager secret name that holds all runtime credentials
-    (CUBEJS_DB_*, SUPERSET_*, OPENAI_API_KEY, git_deploy_token, etc.).
+    Secret name holding all runtime credentials.
     Per-environment stacks append a suffix automatically: DWE_DEPLOY_CUBE_dev, DWE_DEPLOY_CUBE_prod.
+  x_dwe_editable: true
+  x_dwe_per_env: false
