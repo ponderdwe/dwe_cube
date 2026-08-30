@@ -91,8 +91,8 @@ pulumi-apply-{@ ENV_NAME @}:
 {% if CLOUD_PROVIDER == "azure" %}
       VMSS_NAME=$(az vmss list --resource-group $RESOURCE_GROUP \
         --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
-      echo "Reimaging VMSS: $VMSS_NAME"
-      az vmss reimage --resource-group $RESOURCE_GROUP --name $VMSS_NAME --no-wait || true
+      echo "Updating VMSS instances: $VMSS_NAME"
+      az vmss update-instances --resource-group $RESOURCE_GROUP --name $VMSS_NAME --instance-ids '*' --no-wait || true
       echo "Waiting for VMSS instances to be running..."
       for i in $(seq 1 40); do
         STATUS=$(az vmss list-instances --resource-group $RESOURCE_GROUP --name $VMSS_NAME \
@@ -165,8 +165,8 @@ deploy-app-{@ ENV_NAME @}:
       az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
       VMSS_NAME=$(az vmss list --resource-group $RESOURCE_GROUP \
         --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
-      echo "Reimaging VMSS: $VMSS_NAME"
-      az vmss reimage --resource-group $RESOURCE_GROUP --name $VMSS_NAME --no-wait || true
+      echo "Updating VMSS instances: $VMSS_NAME"
+      az vmss update-instances --resource-group $RESOURCE_GROUP --name $VMSS_NAME --instance-ids '*' --no-wait || true
       echo "Waiting for VMSS instances to be running..."
       for i in $(seq 1 40); do
         STATUS=$(az vmss list-instances --resource-group $RESOURCE_GROUP --name $VMSS_NAME \

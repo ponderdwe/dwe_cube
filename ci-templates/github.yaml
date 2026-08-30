@@ -170,7 +170,7 @@ jobs:
           VMSS_NAME=$(az vmss list --resource-group ${{ secrets.RESOURCE_GROUP }} \
             --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
           echo "Reimaging VMSS: $VMSS_NAME"
-          az vmss reimage --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME --no-wait || true
+          az vmss update-instances --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME --instance-ids '*' --no-wait || true
           echo "Waiting for VMSS instances to be running..."
           for i in $(seq 1 40); do
             STATUS=$(az vmss list-instances --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME \
@@ -247,7 +247,7 @@ jobs:
           VMSS_NAME=$(az vmss list --resource-group ${{ secrets.RESOURCE_GROUP }} \
             --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
           echo "Reimaging VMSS: $VMSS_NAME"
-          az vmss reimage --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME --no-wait || true
+          az vmss update-instances --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME --instance-ids '*' --no-wait || true
           echo "Waiting for VMSS instances to be running..."
           for i in $(seq 1 40); do
             STATUS=$(az vmss list-instances --resource-group ${{ secrets.RESOURCE_GROUP }} --name $VMSS_NAME \

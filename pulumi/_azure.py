@@ -452,7 +452,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         type="UserAssigned",
         user_assigned_identities={iid: {}},
     )),
-    upgrade_policy=azure_native.compute.UpgradePolicyArgs(mode="Manual"),
+    upgrade_policy=azure_native.compute.UpgradePolicyArgs(mode="Automatic"),
     virtual_machine_profile=azure_native.compute.VirtualMachineScaleSetVMProfileArgs(
         os_profile=azure_native.compute.VirtualMachineScaleSetOSProfileArgs(
             computer_name_prefix=f"{project_name[:9]}{suffix[:3] if suffix else ''}",
