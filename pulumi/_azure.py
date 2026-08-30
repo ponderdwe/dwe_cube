@@ -69,6 +69,7 @@ ssh_public_key     = secrets["SSH_PUBLIC_KEY"]
 # ── Networking / DNS ──────────────────────────────────────────────────────────
 dns_zone_name      = secrets["DNS_ZONE_NAME"]
 dns_record_name    = secrets["DNS_RECORD_NAME"]
+dns_record_name_sql = secrets.get("DNS_NAME_SQL") or f"{dns_record_name}-sql"
 dns_zone_rg        = secrets.get("DNS_ZONE_RESOURCE_GROUP", resource_group)
 ssl_cert_kv_id     = secrets.get("APP_GW_SSL_CERT_KEY_VAULT_ID", "")
 
@@ -77,7 +78,8 @@ git_deploy_token    = secrets["git_deploy_token"]
 git_deploy_username = secrets.get("git_deploy_username", "x-token-auth")
 
 # ── Application ───────────────────────────────────────────────────────────────
-cubejs_api_secret = secrets["CUBEJS_API_SECRET"]
+cubejs_api_secret   = secrets["CUBEJS_API_SECRET"]
+cubejs_sql_password = secrets["CUBEJS_SQL_PASSWORD"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # User-assigned Managed Identity (used by VMSS to read Key Vault)
@@ -100,6 +102,22 @@ kv_access = azure_native.authorization.RoleAssignment(
     ),
     role_definition_id=pulumi.Output.format(
         "/subscriptions/{0}/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6",
+        subscription_id,
+    ),
+    principal_id=identity.principal_id,
+    principal_type="ServicePrincipal",
+)
+
+# DNS Zone Contributor — lets the VM self-register the SQL A record on boot
+# Role: DNS Zone Contributor (befefa01-2a29-4197-83a8-272ff33ce314)
+dns_zone_access = azure_native.authorization.RoleAssignment(
+    f"{project_name}-dns-role{suffix}",
+    scope=pulumi.Output.format(
+        "/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.Network/dnsZones/{2}",
+        subscription_id, dns_zone_rg, dns_zone_name,
+    ),
+    role_definition_id=pulumi.Output.format(
+        "/subscriptions/{0}/providers/Microsoft.Authorization/roleDefinitions/befefa01-2a29-4197-83a8-272ff33ce314",
         subscription_id,
     ),
     principal_id=identity.principal_id,
@@ -163,8 +181,14 @@ vm_nsg = azure_native.network.NetworkSecurityGroup(
             source_address_prefix="VirtualNetwork", destination_address_prefix="*",
         ),
         azure_native.network.SecurityRuleArgs(
-            name="AllowSSH",
+            name="AllowCubeSQL",
             priority=110, direction="Inbound", access="Allow", protocol="Tcp",
+            source_port_range="*", destination_port_range="15432",
+            source_address_prefix="VirtualNetwork", destination_address_prefix="*",
+        ),
+        azure_native.network.SecurityRuleArgs(
+            name="AllowSSH",
+            priority=120, direction="Inbound", access="Allow", protocol="Tcp",
             source_port_range="*", destination_port_range="22",
             source_address_prefix="VirtualNetwork", destination_address_prefix="*",
         ),
@@ -320,6 +344,27 @@ app_gw = azure_native.network.ApplicationGateway(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SQL DNS self-registration block — runs in user_data on every boot so the
+# A record stays accurate after VMSS reimage (private IP may change).
+# Built outside the f-string to avoid brace-escaping issues.
+# ─────────────────────────────────────────────────────────────────────────────
+_dns_sql_block = f"""
+# Self-register Cube SQL DNS A record in Azure DNS (direct VM, for TCP/15432 SQL connections)
+VM_PRIVATE_IP=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/privateIpAddress?api-version=2021-02-01&format=text")
+az network dns record-set a delete \\
+    --resource-group {dns_zone_rg} \\
+    --zone-name {dns_zone_name} \\
+    --name {dns_record_name_sql} \\
+    --yes 2>/dev/null || true
+az network dns record-set a add-record \\
+    --resource-group {dns_zone_rg} \\
+    --zone-name {dns_zone_name} \\
+    --record-set-name {dns_record_name_sql} \\
+    --ipv4-address "$VM_PRIVATE_IP" \\
+    --ttl 60 || echo "WARNING: Azure DNS SQL record update failed"
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # VMSS user data — install Docker, clone repo, write .env from Key Vault
 # ─────────────────────────────────────────────────────────────────────────────
 user_data_script = f"""#!/bin/bash
@@ -359,7 +404,7 @@ git -C /home/ubuntu/cube rev-parse HEAD > /home/ubuntu/cube/.schema-version
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
 
 cd /home/ubuntu/cube && docker-compose up -d
-"""
+{_dns_sql_block}"""
 custom_data = base64.b64encode(user_data_script.encode()).decode()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -432,7 +477,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         ),
     ),
     tags=tags,
-    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access]),
+    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access, dns_zone_access]),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,8 +559,9 @@ if _kg_host and _kg_token and _kg_mappings:
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
-pulumi.export("appgw_name",  app_gw.name)
-pulumi.export("vmss_name",   vmss.name)
-pulumi.export("url",         f"https://{dns_record_name}.{dns_zone_name}")
-pulumi.export("public_ip",   public_ip.ip_address)
-pulumi.export("environment", env)
+pulumi.export("appgw_name",   app_gw.name)
+pulumi.export("vmss_name",    vmss.name)
+pulumi.export("url",          f"https://{dns_record_name}.{dns_zone_name}")
+pulumi.export("sql_endpoint", f"{dns_record_name_sql}.{dns_zone_name}:15432")
+pulumi.export("public_ip",    public_ip.ip_address)
+pulumi.export("environment",  env)

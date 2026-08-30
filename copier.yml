@@ -177,6 +177,9 @@ _dwe_hub:
     - key: CUBEJS_API_SECRET
       description: "JWT signing secret for Cube.js API — generate with: openssl rand -hex 32"
       destination: secrets_manager
+    - key: CUBEJS_SQL_PASSWORD
+      description: "Password for the Cube SQL wire protocol (PostgreSQL-compatible on port 15432) — generate with: openssl rand -hex 16"
+      destination: secrets_manager
     - key: SUPERSET_URL
       description: "Superset instance URL for dbt-cube-sync (e.g. https://superset.myorg.com)"
       destination: secrets_manager
@@ -192,6 +195,9 @@ _dwe_hub:
       destination: secrets_manager
     - key: EC2_DNS
       description: "DNS name for the EC2 instance A record (e.g. cube.internal.myorg.com). Resolves to private IP when ALB is internal, public IP otherwise."
+      destination: secrets_manager
+    - key: DNS_NAME_SQL
+      description: "Subdomain for the Cube SQL wire protocol endpoint (e.g. cube-sql). Zone is appended automatically. Defaults to <DNS_RECORD_NAME>-sql. Override only if you need a different subdomain."
       destination: secrets_manager
     - key: OPENAI_API_KEY
       description: "OpenAI API key for Milvus RAG embeddings"

@@ -67,6 +67,9 @@ alb_internal          = secrets.get("ALB_INTERNAL", "false").lower() == "true"
 # ── Networking / DNS ──────────────────────────────────────────────────────────
 route53_zone_id     = secrets["ROUTE53_ZONE_ID"]
 dns_name            = secrets["DNS_NAME"]
+_dns_parts    = dns_name.split(".", 1)
+dns_name_sql  = secrets.get("DNS_NAME_SQL") or f"{_dns_parts[0]}-sql"
+_dns_fqdn_sql = f"{dns_name_sql}.{_dns_parts[1]}"
 acm_certificate_arn = secrets["ACM_CERTIFICATE_ARN"]
 
 # ── Git ───────────────────────────────────────────────────────────────────────
@@ -74,13 +77,14 @@ git_deploy_token    = secrets["git_deploy_token"]
 git_deploy_username = secrets.get("git_deploy_username", "x-token-auth")
 
 # ── Application ───────────────────────────────────────────────────────────────
-cubejs_db_type    = secrets["CUBEJS_DB_TYPE"]
-cubejs_db_host    = secrets["CUBEJS_DB_HOST"]
-cubejs_db_port    = secrets["CUBEJS_DB_PORT"]
-cubejs_db_name    = secrets["CUBEJS_DB_NAME"]
-cubejs_db_user    = secrets["CUBEJS_DB_USER"]
-cubejs_db_pass    = secrets["CUBEJS_DB_PASS"]
-cubejs_api_secret = secrets["CUBEJS_API_SECRET"]
+cubejs_db_type      = secrets["CUBEJS_DB_TYPE"]
+cubejs_db_host      = secrets["CUBEJS_DB_HOST"]
+cubejs_db_port      = secrets["CUBEJS_DB_PORT"]
+cubejs_db_name      = secrets["CUBEJS_DB_NAME"]
+cubejs_db_user      = secrets["CUBEJS_DB_USER"]
+cubejs_db_pass      = secrets["CUBEJS_DB_PASS"]
+cubejs_api_secret   = secrets["CUBEJS_API_SECRET"]
+cubejs_sql_password = secrets["CUBEJS_SQL_PASSWORD"]
 
 # ── EC2 DNS (optional) ────────────────────────────────────────────────────────
 ec2_dns_zone_id = secrets.get("HOSTED_ZONE_ID_EC2_DNS", "")
@@ -110,6 +114,17 @@ if ec2_dns_zone_id:
             "Version": "2012-10-17",
             "Statement": [{"Effect": "Allow", "Action": ["route53:ChangeResourceRecordSets"],
                            "Resource": f"arn:aws:route53:::hostedzone/{ec2_dns_zone_id}"}],
+        }),
+    )
+if dns_name_sql:
+    # Allow instance to self-register the SQL DNS A record in the main hosted zone
+    aws.iam.RolePolicy(
+        f"{project_name}-r53-sql{suffix}",
+        role=instance_role.name,
+        policy=json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": ["route53:ChangeResourceRecordSets"],
+                           "Resource": f"arn:aws:route53:::hostedzone/{route53_zone_id}"}],
         }),
     )
 instance_profile = aws.iam.InstanceProfile(
@@ -152,6 +167,10 @@ aws.ec2.SecurityGroupRule(f"{project_name}-ec2-app{suffix}",
     type="ingress", security_group_id=ec2_sg.id,
     protocol="tcp", from_port=app_port, to_port=app_port,
     source_security_group_id=alb_sg.id)
+aws.ec2.SecurityGroupRule(f"{project_name}-ec2-sql{suffix}",
+    type="ingress", security_group_id=ec2_sg.id,
+    protocol="tcp", from_port=15432, to_port=15432,
+    cidr_blocks=[vpc_info.cidr_block])
 aws.ec2.SecurityGroupRule(f"{project_name}-ec2-ssh{suffix}",
     type="ingress", security_group_id=ec2_sg.id,
     protocol="tcp", from_port=22, to_port=22, cidr_blocks=access_cidr)
@@ -196,6 +215,26 @@ aws route53 change-resource-record-sets \\
 else:
     _r53_block = ""
 
+if dns_name_sql:
+    _ip_meta_sql = "local-ipv4" if alb_internal else "public-ipv4"
+    _r53_json_sql = (
+        '{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"'
+        + _dns_fqdn_sql
+        + '","Type":"A","TTL":60,"ResourceRecords":[{"Value":"__CUBE_IP__"}]}}]}'
+    )
+    _r53_sql_block = f"""
+# Self-register Cube SQL DNS A record (direct EC2, for TCP/15432 SQL connections)
+CUBE_IP=$(curl -s http://169.254.169.254/latest/meta-data/{_ip_meta_sql})
+R53_SQL_CHANGE='{_r53_json_sql}'
+R53_SQL_CHANGE=$(echo "$R53_SQL_CHANGE" | sed "s/__CUBE_IP__/$CUBE_IP/")
+aws route53 change-resource-record-sets \\
+    --hosted-zone-id {route53_zone_id} \\
+    --region {aws_region} \\
+    --change-batch "$R53_SQL_CHANGE" || echo "WARNING: Route53 SQL DNS update failed"
+"""
+else:
+    _r53_sql_block = ""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # User data — install Docker, clone repo, write .env from Secrets Manager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -237,7 +276,7 @@ git -C /home/ubuntu/cube rev-parse HEAD > /home/ubuntu/cube/.schema-version
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
 
 cd /home/ubuntu/cube && docker-compose up -d
-{_r53_block}"""
+{_r53_block}{_r53_sql_block}"""
 user_data = base64.b64encode(user_data_script.encode()).decode()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -436,7 +475,8 @@ if _kg_host and _kg_token and _kg_mappings:
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
-pulumi.export("alb_dns",     alb.dns_name)
-pulumi.export("url",         f"https://{dns_name}")
-pulumi.export("asg_name",    asg.name)
-pulumi.export("environment", env)
+pulumi.export("alb_dns",      alb.dns_name)
+pulumi.export("url",          f"https://{dns_name}")
+pulumi.export("sql_endpoint", f"{_dns_fqdn_sql}:15432")
+pulumi.export("asg_name",     asg.name)
+pulumi.export("environment",  env)
