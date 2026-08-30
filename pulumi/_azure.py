@@ -108,21 +108,6 @@ kv_access = azure_native.authorization.RoleAssignment(
     principal_type="ServicePrincipal",
 )
 
-# DNS Zone Contributor — lets the VM self-register the SQL A record on boot
-# Role: DNS Zone Contributor (befefa01-2a29-4197-83a8-272ff33ce314)
-dns_zone_access = azure_native.authorization.RoleAssignment(
-    f"{project_name}-dns-role{suffix}",
-    scope=pulumi.Output.format(
-        "/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.Network/dnsZones/{2}",
-        subscription_id, dns_zone_rg, dns_zone_name,
-    ),
-    role_definition_id=pulumi.Output.format(
-        "/subscriptions/{0}/providers/Microsoft.Authorization/roleDefinitions/befefa01-2a29-4197-83a8-272ff33ce314",
-        subscription_id,
-    ),
-    principal_id=identity.principal_id,
-    principal_type="ServicePrincipal",
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public IP for Application Gateway
@@ -344,27 +329,6 @@ app_gw = azure_native.network.ApplicationGateway(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SQL DNS self-registration block — runs in user_data on every boot so the
-# A record stays accurate after VMSS reimage (private IP may change).
-# Built outside the f-string to avoid brace-escaping issues.
-# ─────────────────────────────────────────────────────────────────────────────
-_dns_sql_block = f"""
-# Self-register Cube SQL DNS A record in Azure DNS (direct VM, for TCP/15432 SQL connections)
-VM_PRIVATE_IP=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/privateIpAddress?api-version=2021-02-01&format=text")
-az network dns record-set a delete \\
-    --resource-group {dns_zone_rg} \\
-    --zone-name {dns_zone_name} \\
-    --name {dns_record_name_sql} \\
-    --yes 2>/dev/null || true
-az network dns record-set a add-record \\
-    --resource-group {dns_zone_rg} \\
-    --zone-name {dns_zone_name} \\
-    --record-set-name {dns_record_name_sql} \\
-    --ipv4-address "$VM_PRIVATE_IP" \\
-    --ttl 60 || echo "WARNING: Azure DNS SQL record update failed"
-"""
-
-# ─────────────────────────────────────────────────────────────────────────────
 # VMSS user data — install Docker, clone repo, write .env from Key Vault
 # ─────────────────────────────────────────────────────────────────────────────
 user_data_script = f"""#!/bin/bash
@@ -404,7 +368,7 @@ git -C /home/ubuntu/cube rev-parse HEAD > /home/ubuntu/cube/.schema-version
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
 
 cd /home/ubuntu/cube && docker-compose up -d
-{_dns_sql_block}"""
+"""
 custom_data = base64.b64encode(user_data_script.encode()).decode()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,7 +441,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         ),
     ),
     tags=tags,
-    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access, dns_zone_access]),
+    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access]),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -488,6 +452,19 @@ azure_native.network.RecordSet(
     resource_group_name=dns_zone_rg,
     zone_name=dns_zone_name,
     relative_record_set_name=dns_record_name,
+    record_type="A",
+    ttl=30,
+    a_records=public_ip.ip_address.apply(
+        lambda ip: [azure_native.network.ARecordArgs(ipv4_address=ip)] if ip else []
+    ),
+)
+
+# CNAME for SQL endpoint → same App Gateway IP (clients connect directly on port 15432 within VNet)
+azure_native.network.RecordSet(
+    f"{project_name}-dns-sql{suffix}",
+    resource_group_name=dns_zone_rg,
+    zone_name=dns_zone_name,
+    relative_record_set_name=dns_record_name_sql,
     record_type="A",
     ttl=30,
     a_records=public_ip.ip_address.apply(
