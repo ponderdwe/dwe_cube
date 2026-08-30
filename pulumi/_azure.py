@@ -123,6 +123,19 @@ public_ip = azure_native.network.PublicIPAddress(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Public IP for Network Load Balancer (TCP/15432 — Cube SQL wire protocol)
+# ─────────────────────────────────────────────────────────────────────────────
+nlb_pip = azure_native.network.PublicIPAddress(
+    f"{project_name}-nlb-pip{suffix}",
+    resource_group_name=resource_group,
+    location=azure_location,
+    public_ip_address_name=f"{project_name}-nlb-pip{suffix}",
+    sku=azure_native.network.PublicIPAddressSkuArgs(name="Standard"),
+    public_ip_allocation_method="Static",
+    tags=tags,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Network Security Groups
 # ─────────────────────────────────────────────────────────────────────────────
 app_gw_nsg = azure_native.network.NetworkSecurityGroup(
@@ -169,7 +182,7 @@ vm_nsg = azure_native.network.NetworkSecurityGroup(
             name="AllowCubeSQL",
             priority=110, direction="Inbound", access="Allow", protocol="Tcp",
             source_port_range="*", destination_port_range="15432",
-            source_address_prefix="VirtualNetwork", destination_address_prefix="*",
+            source_address_prefix="*", destination_address_prefix="*",
         ),
         azure_native.network.SecurityRuleArgs(
             name="AllowSSH",
@@ -329,6 +342,57 @@ app_gw = azure_native.network.ApplicationGateway(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Standard Load Balancer — TCP/15432 pass-through for Cube SQL wire protocol
+# App Gateway cannot proxy TCP, so external SQL clients use this NLB instead.
+# ─────────────────────────────────────────────────────────────────────────────
+nlb_name   = f"{project_name}-nlb{suffix}"
+nlb_prefix = (
+    f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    f"/providers/Microsoft.Network/loadBalancers/{nlb_name}"
+)
+
+nlb = azure_native.network.LoadBalancer(
+    nlb_name,
+    resource_group_name=resource_group,
+    location=azure_location,
+    load_balancer_name=nlb_name,
+    sku=azure_native.network.LoadBalancerSkuArgs(name="Standard"),
+    frontend_ip_configurations=[azure_native.network.FrontendIPConfigurationArgs(
+        name="nlb-frontend",
+        public_ip_address=azure_native.network.PublicIPAddressArgs(id=nlb_pip.id),
+    )],
+    backend_address_pools=[azure_native.network.BackendAddressPoolArgs(
+        name="nlb-backend",
+    )],
+    probes=[azure_native.network.ProbeArgs(
+        name="cube-sql-probe",
+        protocol="Tcp",
+        port=15432,
+        interval_in_seconds=15,
+        number_of_probes=2,
+    )],
+    load_balancing_rules=[azure_native.network.LoadBalancingRuleArgs(
+        name="cube-sql-rule",
+        protocol="Tcp",
+        frontend_port=15432,
+        backend_port=15432,
+        idle_timeout_in_minutes=4,
+        enable_floating_ip=False,
+        frontend_ip_configuration=azure_native.network.SubResourceArgs(
+            id=f"{nlb_prefix}/frontendIPConfigurations/nlb-frontend",
+        ),
+        backend_address_pool=azure_native.network.SubResourceArgs(
+            id=f"{nlb_prefix}/backendAddressPools/nlb-backend",
+        ),
+        probe=azure_native.network.SubResourceArgs(
+            id=f"{nlb_prefix}/probes/cube-sql-probe",
+        ),
+    )],
+    tags=tags,
+    opts=pulumi.ResourceOptions(depends_on=[nlb_pip]),
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # VMSS user data — install Docker, clone repo, write .env from Key Vault
 # ─────────────────────────────────────────────────────────────────────────────
 user_data_script = f"""#!/bin/bash
@@ -433,6 +497,11 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
                                     id=f"{ag_prefix}/backendAddressPools/backendPool"
                                 )
                             ],
+                            load_balancer_backend_address_pools=[
+                                azure_native.network.SubResourceArgs(
+                                    id=f"{nlb_prefix}/backendAddressPools/nlb-backend"
+                                )
+                            ],
                         )
                     ],
                     network_security_group=azure_native.network.SubResourceArgs(id=vm_nsg.id),
@@ -441,7 +510,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         ),
     ),
     tags=tags,
-    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access]),
+    opts=pulumi.ResourceOptions(depends_on=[app_gw, nlb, kv_access]),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,7 +528,7 @@ azure_native.network.RecordSet(
     ),
 )
 
-# CNAME for SQL endpoint → same App Gateway IP (clients connect directly on port 15432 within VNet)
+# A record for SQL endpoint → NLB public IP (Standard LB passes TCP/15432 through to VMSS)
 azure_native.network.RecordSet(
     f"{project_name}-dns-sql{suffix}",
     resource_group_name=dns_zone_rg,
@@ -467,7 +536,7 @@ azure_native.network.RecordSet(
     relative_record_set_name=dns_record_name_sql,
     record_type="A",
     ttl=30,
-    a_records=public_ip.ip_address.apply(
+    a_records=nlb_pip.ip_address.apply(
         lambda ip: [azure_native.network.ARecordArgs(ipv4_address=ip)] if ip else []
     ),
 )
@@ -537,8 +606,10 @@ if _kg_host and _kg_token and _kg_mappings:
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
 pulumi.export("appgw_name",   app_gw.name)
+pulumi.export("nlb_name",     nlb.name)
 pulumi.export("vmss_name",    vmss.name)
 pulumi.export("url",          f"https://{dns_record_name}.{dns_zone_name}")
 pulumi.export("sql_endpoint", f"{dns_record_name_sql}.{dns_zone_name}:15432")
 pulumi.export("public_ip",    public_ip.ip_address)
+pulumi.export("nlb_public_ip", nlb_pip.ip_address)
 pulumi.export("environment",  env)
