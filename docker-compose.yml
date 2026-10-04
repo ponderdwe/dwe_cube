@@ -15,7 +15,7 @@ networks:
 volumes:
   milvus-data:
   milvus-etcd-data:
-  milvus-minio-data:
+  seaweedfs-data:
 
 services:
 
@@ -135,19 +135,17 @@ services:
       - cube_network
 
   milvus-minio:
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    image: chrislusf/seaweedfs:latest
     restart: always
-    environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+    command: server -s3 -dir=/data -master.volumeSizeLimitMB=256
     volumes:
-      - milvus-minio-data:/minio_data
-    command: minio server /minio_data --console-address ":9001"
+      - seaweedfs-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
+      test: ["CMD", "sh", "-c", "wget -qO- http://$(hostname -i):8333/ > /dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
     networks:
       - cube_network
 
@@ -159,7 +157,10 @@ services:
       - seccomp:unconfined
     environment:
       ETCD_ENDPOINTS: milvus-etcd:2379
-      MINIO_ADDRESS: milvus-minio:9000
+      MINIO_ADDRESS: milvus-minio:8333
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+      MINIO_USE_SSL: "false"
     volumes:
       - milvus-data:/var/lib/milvus
     healthcheck:
