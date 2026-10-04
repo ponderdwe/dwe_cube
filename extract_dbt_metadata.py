@@ -39,6 +39,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DBT_URL = os.getenv("DBT_URL", "https://cloud.getdbt.com").rstrip("/")
+
 OUTPUT_DIR = Path("dbt_metadata")
 MANIFEST_OUT = OUTPUT_DIR / "manifest.json"
 CATALOG_OUT = OUTPUT_DIR / "catalog.json"
@@ -57,7 +59,7 @@ def _dbt_cloud_headers(token: str) -> dict:
 
 
 def _latest_run_id(token: str, account_id: str, job_id: str) -> int:
-    url = f"https://cloud.getdbt.com/api/v2/accounts/{account_id}/runs/"
+    url = f"{DBT_URL}/api/v2/accounts/{account_id}/runs/"
     resp = requests.get(
         url,
         headers=_dbt_cloud_headers(token),
@@ -72,7 +74,7 @@ def _latest_run_id(token: str, account_id: str, job_id: str) -> int:
 
 
 def _download_artifact(token: str, account_id: str, run_id: int, artifact: str, dest: Path) -> None:
-    url = f"https://cloud.getdbt.com/api/v2/accounts/{account_id}/runs/{run_id}/artifacts/{artifact}.json"
+    url = f"{DBT_URL}/api/v2/accounts/{account_id}/runs/{run_id}/artifacts/{artifact}.json"
     resp = requests.get(url, headers=_dbt_cloud_headers(token), timeout=60)
     resp.raise_for_status()
     dest.write_text(json.dumps(resp.json(), indent=2))

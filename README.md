@@ -2,7 +2,7 @@
 
 Production-ready deployment adapter for **Cube.js** (semantic layer) + **CubeStore** (pre-aggregation cache) + **Milvus** (vector DB for RAG) + **FastAPI RAG service** + **Streamlit chat UI**.
 
-Managed and hydrated by [DWE-Hub](https://github.com/ponderedw/dwe-hub).
+Managed and hydrated by [dwe-core](https://github.com/ponderdwe/dwe-core).
 
 ---
 
@@ -48,23 +48,20 @@ Services will be available at:
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and fill in the required values:
-
-```bash
-cp .env.example .env
-```
+Copy `.env.example` to `.env` and fill in the required values.
 
 Key variables:
 
 | Variable | Description |
 |---|---|
-| `CUBEJS_DB_TYPE` | Database type (e.g. `postgres`, `redshift`, `snowflake`) |
+| `CUBEJS_DB_TYPE` | Database type (`postgres`, `redshift`, `snowflake`, …) |
 | `CUBEJS_DB_HOST` | Database host |
 | `CUBEJS_DB_PORT` | Database port |
 | `CUBEJS_DB_NAME` | Database name |
 | `CUBEJS_DB_USER` | Database user |
 | `CUBEJS_DB_PASS` | Database password |
-| `CUBEJS_API_SECRET` | Secret for JWT token signing (generate with `openssl rand -hex 32`) |
+| `CUBEJS_API_SECRET` | JWT signing secret (`openssl rand -hex 32`) |
+| `CUBEJS_SQL_PASSWORD` | Password to enable the Postgres SQL wire API on port 15432 |
 | `DATABASE_URI` | SQLAlchemy URI for dbt-cube-sync |
 | `SUPERSET_URL` | Apache Superset URL for sync |
 | `SUPERSET_USERNAME` | Superset admin username |
@@ -89,93 +86,72 @@ This runs:
 
 ---
 
-## Deploy to AWS
+## Cloud Deployment
 
-Infrastructure is managed with [Pulumi](https://www.pulumi.com/). It provisions:
-- EC2 instance (single-instance, stateful — CubeStore + Milvus need persistent volumes)
-- Elastic IP
-- Route53 A record (optional)
+Infrastructure is managed with [Pulumi](https://www.pulumi.com/) and provisioned by dwe-core. Supports **AWS** and **Azure**.
 
-### Prerequisites
+### AWS
 
-```bash
-pip install pulumi pulumi-aws boto3
-pulumi login
-```
+Resources provisioned:
+- Auto Scaling Group (ASG) with Launch Template
+- Application Load Balancer (ALB) for HTTPS on port 443
+- Route53 A record: `cube.<domain>` → ALB
+- Secrets pulled from **AWS Secrets Manager** at VM boot
 
-### Deploy
+### Azure
 
-```bash
-# Production
-just deploy-prod
+Resources provisioned:
+- Virtual Machine Scale Set (VMSS) with Automatic upgrade policy
+- Application Gateway for HTTPS on port 443
+- Standard Load Balancer (NLB) for TCP passthrough on port 15432
+- DNS A records:
+  - `cube.<domain>` → Application Gateway public IP
+  - `cube-sql.<domain>` → NLB public IP
+- Secrets pulled from **Azure Key Vault** at VM boot
 
-# Development
-just deploy-dev
-
-# Preview changes without applying
-just preview-prod
-```
-
-### Destroy
-
-```bash
-just destroy-dev   # dev environment
-just destroy-prod  # prod environment (use with caution)
-```
-
-### Configuration
-
-Edit `pulumi/Pulumi.prod.yaml` or `pulumi/Pulumi.dev.yaml`:
-
-```yaml
-config:
-  dwe-cube:environment: prod
-  dwe-cube:git_branch: main
-  dwe-cube:dns_name: cube.example.com     # your domain
-  dwe-cube:secret_id: my_cube_secrets     # AWS Secrets Manager secret name
-  dwe-cube:instance_type: t3.xlarge
-  dwe-cube:volume_size: "100"
-  dwe-cube:aws_region: us-east-1
-  # dwe-cube:vpc_id: vpc-xxxxxxxxx
-  # dwe-cube:subnet_id: subnet-xxxxxxxxx
-  # dwe-cube:security_group_id: sg-xxxxxxxxx
-  # dwe-cube:route53_zone_id: ZXXXXXXXXXX
-```
-
-### AWS Secrets Manager
-
-Store your `.env` values as a JSON secret in AWS Secrets Manager:
-
-```json
-{
-  "CUBEJS_DB_TYPE": "postgres",
-  "CUBEJS_DB_HOST": "...",
-  "CUBEJS_DB_USER": "...",
-  "CUBEJS_DB_PASS": "...",
-  "CUBEJS_DB_NAME": "...",
-  "CUBEJS_API_SECRET": "...",
-  "DATABASE_URI": "postgresql://...",
-  "SUPERSET_URL": "https://superset.example.com",
-  "SUPERSET_USERNAME": "admin",
-  "SUPERSET_PASSWORD": "...",
-  "OPENAI_API_KEY": "sk-...",
-  "git_deploy_token": "ghp_..."
-}
-```
-
-The EC2 instance will automatically pull this secret on first boot and write it to `.env`.
+The SQL wire protocol (`cube-sql.<domain>:15432`) requires `CUBEJS_SQL_PASSWORD` to be set in secrets.
 
 ---
 
-## DWE-Hub Integration
+## CI/CD
 
-This repo is an **adapter** managed by [DWE-Hub](https://github.com/ponderedw/dwe-hub).
+Deployment is triggered automatically on push. Two CI template flavors are available in `ci-templates/`:
 
-DWE-Hub can:
-1. Hydrate this repo with org-specific config (`.env.example` headers, CI/CD files, Pulumi stack configs)
-2. Push changes to a `dwe-hub-<timestamp>` branch for review
+- `github.yaml` — GitHub Actions
+- `gitlab.yaml` — GitLab CI
 
-To set up: configure the **Cube** adapter in DWE-Hub → Organizations → your org → Deploy tab.
+**Two-path deploy:**
+- `pulumi/**` changed → `pulumi preview` (PR) or `pulumi up` + instance refresh (push)
+- App files only → instance refresh only (skips Pulumi)
+
+---
+
+## dwe-core Integration
+
+This repo is a **dwe-core adapter**. Use the `dwe` CLI to create or update deployments:
+
+```bash
+# See what copier questions the adapter accepts
+dwe adapter-questions dwe_cube
+
+# See required secrets
+dwe show-secrets-template dwe_cube --cloud azure
+
+# Create a new deployment repo from this adapter
+dwe create-service dwe_cube \
+  --git-repo https://github.com/your-org/cube-deploy \
+  --envs prod \
+  --set git_repo_url=https://github.com/your-org/cube-deploy
+
+# Update an existing deployment to a newer adapter version
+dwe update-service dwe_cube ./cube-deploy
+
+# Push secrets to the deployment repo
+dwe set-secrets \
+  --git-repo https://github.com/your-org/cube-deploy \
+  --secrets-file secrets.json \
+  --adapter dwe_cube
+```
 
 ---
 
@@ -191,9 +167,4 @@ just sync         # run DBT → Cube → Superset sync
 just logs         # follow all service logs
 just logs-service cube_api   # follow a specific service log
 just shell        # open shell in cube_api container
-just deploy-prod  # deploy production stack via Pulumi
-just deploy-dev   # deploy dev stack via Pulumi
-just preview-prod # preview production changes
-just destroy-dev  # destroy dev infrastructure
-just destroy-prod # destroy prod infrastructure
 ```

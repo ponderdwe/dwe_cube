@@ -199,6 +199,9 @@ _dwe_hub:
     - key: DNS_NAME_SQL
       description: "Subdomain for the Cube SQL wire protocol endpoint (e.g. cube-sql). Zone is appended automatically. Defaults to <DNS_RECORD_NAME>-sql. Override only if you need a different subdomain."
       destination: secrets_manager
+    - key: DBT_URL
+      description: "dbt Cloud base URL (default: https://cloud.getdbt.com). Override for on-premises dbt Cloud or single-tenant deployments."
+      destination: secrets_manager
     - key: OPENAI_API_KEY
       description: "OpenAI API key for Milvus RAG embeddings"
       destination: secrets_manager
