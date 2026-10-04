@@ -61,10 +61,18 @@ def get_secret(kv_name: str, sid: str) -> dict:
 secrets = get_secret(key_vault_name, secret_id)
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
-vnet_id            = secrets["VNET_ID"]
-app_gw_subnet_id   = secrets["APP_GW_SUBNET_ID"]
-vm_subnet_id       = secrets["VM_SUBNET_ID"]
-ssh_public_key     = secrets["SSH_PUBLIC_KEY"]
+vnet_id        = secrets["VNET_ID"]
+vm_subnet_id   = secrets["VM_SUBNET_ID"]
+ssh_public_key = secrets["SSH_PUBLIC_KEY"]
+
+common_app_gw_id        = secrets.get("COMMON_APP_GW_ID", "")
+common_app_gw_public_ip = secrets.get("COMMON_APP_GW_PUBLIC_IP", "")
+use_common_lb = bool(common_app_gw_id)
+if use_common_lb:
+    if not common_app_gw_public_ip:
+        raise ValueError("COMMON_APP_GW_PUBLIC_IP is required when COMMON_APP_GW_ID is set")
+else:
+    app_gw_subnet_id = secrets["APP_GW_SUBNET_ID"]
 
 # ── Networking / DNS ──────────────────────────────────────────────────────────
 dns_zone_name      = secrets["DNS_ZONE_NAME"]
@@ -112,15 +120,17 @@ kv_access = azure_native.authorization.RoleAssignment(
 # ─────────────────────────────────────────────────────────────────────────────
 # Public IP for Application Gateway
 # ─────────────────────────────────────────────────────────────────────────────
-public_ip = azure_native.network.PublicIPAddress(
-    f"{project_name}-pip{suffix}",
-    resource_group_name=resource_group,
-    location=azure_location,
-    public_ip_address_name=f"{project_name}-pip{suffix}",
-    sku=azure_native.network.PublicIPAddressSkuArgs(name="Standard"),
-    public_ip_allocation_method="Static",
-    tags=tags,
-)
+public_ip = None
+if not use_common_lb:
+    public_ip = azure_native.network.PublicIPAddress(
+        f"{project_name}-pip{suffix}",
+        resource_group_name=resource_group,
+        location=azure_location,
+        public_ip_address_name=f"{project_name}-pip{suffix}",
+        sku=azure_native.network.PublicIPAddressSkuArgs(name="Standard"),
+        public_ip_allocation_method="Static",
+        tags=tags,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public IP for Network Load Balancer (TCP/15432 — Cube SQL wire protocol)
@@ -287,59 +297,61 @@ ag_identity = identity.id.apply(lambda iid: azure_native.network.ManagedServiceI
     user_assigned_identities={iid: {}},
 )) if has_ssl else None
 
-app_gw = azure_native.network.ApplicationGateway(
-    app_gw_name,
-    resource_group_name=resource_group,
-    application_gateway_name=app_gw_name,
-    location=azure_location,
-    sku=azure_native.network.ApplicationGatewaySkuArgs(
-        name="Standard_v2",
-        tier="Standard_v2",
-        capacity=1,
-    ),
-    identity=ag_identity,
-    gateway_ip_configurations=[azure_native.network.ApplicationGatewayIPConfigurationArgs(
-        name="appGatewayIpConfig",
-        subnet=azure_native.network.SubResourceArgs(id=app_gw_subnet_id),
-    )],
-    frontend_ip_configurations=[azure_native.network.ApplicationGatewayFrontendIPConfigurationArgs(
-        name="appGwPublicFrontendIp",
-        public_ip_address=azure_native.network.SubResourceArgs(id=public_ip.id),
-    )],
-    frontend_ports=[
-        azure_native.network.ApplicationGatewayFrontendPortArgs(name="port_80", port=80),
-        azure_native.network.ApplicationGatewayFrontendPortArgs(name="port_443", port=443),
-    ],
-    backend_address_pools=[
-        azure_native.network.ApplicationGatewayBackendAddressPoolArgs(name="backendPool"),
-    ],
-    backend_http_settings_collection=[
-        azure_native.network.ApplicationGatewayBackendHttpSettingsArgs(
-            name="backendHttpSettings",
-            port=app_port,
+app_gw = None
+if not use_common_lb:
+    app_gw = azure_native.network.ApplicationGateway(
+        app_gw_name,
+        resource_group_name=resource_group,
+        application_gateway_name=app_gw_name,
+        location=azure_location,
+        sku=azure_native.network.ApplicationGatewaySkuArgs(
+            name="Standard_v2",
+            tier="Standard_v2",
+            capacity=1,
+        ),
+        identity=ag_identity,
+        gateway_ip_configurations=[azure_native.network.ApplicationGatewayIPConfigurationArgs(
+            name="appGatewayIpConfig",
+            subnet=azure_native.network.SubResourceArgs(id=app_gw_subnet_id),
+        )],
+        frontend_ip_configurations=[azure_native.network.ApplicationGatewayFrontendIPConfigurationArgs(
+            name="appGwPublicFrontendIp",
+            public_ip_address=azure_native.network.SubResourceArgs(id=public_ip.id),
+        )],
+        frontend_ports=[
+            azure_native.network.ApplicationGatewayFrontendPortArgs(name="port_80", port=80),
+            azure_native.network.ApplicationGatewayFrontendPortArgs(name="port_443", port=443),
+        ],
+        backend_address_pools=[
+            azure_native.network.ApplicationGatewayBackendAddressPoolArgs(name="backendPool"),
+        ],
+        backend_http_settings_collection=[
+            azure_native.network.ApplicationGatewayBackendHttpSettingsArgs(
+                name="backendHttpSettings",
+                port=app_port,
+                protocol="Http",
+                cookie_based_affinity="Disabled",
+                request_timeout=600,
+                probe=azure_native.network.SubResourceArgs(
+                    id=f"{ag_prefix}/probes/healthProbe"),
+            )
+        ],
+        probes=[azure_native.network.ApplicationGatewayProbeArgs(
+            name="healthProbe",
             protocol="Http",
-            cookie_based_affinity="Disabled",
-            request_timeout=600,
-            probe=azure_native.network.SubResourceArgs(
-                id=f"{ag_prefix}/probes/healthProbe"),
-        )
-    ],
-    probes=[azure_native.network.ApplicationGatewayProbeArgs(
-        name="healthProbe",
-        protocol="Http",
-        host="127.0.0.1",
-        path="/readyz",
-        interval=30,
-        timeout=10,
-        unhealthy_threshold=3,
-    )],
-    http_listeners=http_listeners,
-    request_routing_rules=routing_rules,
-    ssl_certificates=ssl_certs,
-    redirect_configurations=redirect_configurations,
-    tags=tags,
-    opts=pulumi.ResourceOptions(depends_on=[public_ip, kv_access]),
-)
+            host="127.0.0.1",
+            path="/readyz",
+            interval=30,
+            timeout=10,
+            unhealthy_threshold=3,
+        )],
+        http_listeners=http_listeners,
+        request_routing_rules=routing_rules,
+        ssl_certificates=ssl_certs,
+        redirect_configurations=redirect_configurations,
+        tags=tags,
+        opts=pulumi.ResourceOptions(depends_on=[public_ip, kv_access]),
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Standard Load Balancer — TCP/15432 pass-through for Cube SQL wire protocol
@@ -494,7 +506,8 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
                             subnet=azure_native.compute.ApiEntityReferenceArgs(id=vm_subnet_id),
                             application_gateway_backend_address_pools=[
                                 azure_native.network.SubResourceArgs(
-                                    id=f"{ag_prefix}/backendAddressPools/backendPool"
+                                    id=(f"{common_app_gw_id}/backendAddressPools/cube-pool" if use_common_lb
+                                        else f"{ag_prefix}/backendAddressPools/backendPool")
                                 )
                             ],
                             load_balancer_backend_address_pools=[
@@ -510,7 +523,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         ),
     ),
     tags=tags,
-    opts=pulumi.ResourceOptions(depends_on=[app_gw, nlb, kv_access]),
+    opts=pulumi.ResourceOptions(depends_on=([nlb, kv_access] if use_common_lb else [app_gw, nlb, kv_access])),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -523,8 +536,12 @@ azure_native.network.RecordSet(
     relative_record_set_name=dns_record_name,
     record_type="A",
     ttl=30,
-    a_records=public_ip.ip_address.apply(
-        lambda ip: [azure_native.network.ARecordArgs(ipv4_address=ip)] if ip else []
+    a_records=(
+        [azure_native.network.ARecordArgs(ipv4_address=common_app_gw_public_ip)]
+        if use_common_lb else
+        public_ip.ip_address.apply(
+            lambda ip: [azure_native.network.ARecordArgs(ipv4_address=ip)] if ip else []
+        )
     ),
 )
 
@@ -558,9 +575,9 @@ if _kg_host and _kg_token and _kg_mappings:
     _kg_services   = _kg_mappings.get("services", [])
 
     _pulumi_export_map = {
-        "url": pulumi.Output.from_input(f"https://{dns_record_name}.{dns_zone_name}"),
-        "appgw_name": app_gw.name,
-        "vmss_name": vmss.name,
+        "url":        pulumi.Output.from_input(f"https://{dns_record_name}.{dns_zone_name}"),
+        "appgw_name": app_gw.name if app_gw else pulumi.Output.from_input(""),
+        "vmss_name":  vmss.name,
     }
     _out_names = list(_kg_outputs.keys())
     _out_vals  = [_pulumi_export_map.get(_kg_outputs[n], pulumi.Output.from_input("")) for n in _out_names]
@@ -605,11 +622,13 @@ if _kg_host and _kg_token and _kg_mappings:
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
-pulumi.export("appgw_name",   app_gw.name)
+if app_gw:
+    pulumi.export("appgw_name", app_gw.name)
+if public_ip:
+    pulumi.export("public_ip", public_ip.ip_address)
 pulumi.export("nlb_name",     nlb.name)
 pulumi.export("vmss_name",    vmss.name)
 pulumi.export("url",          f"https://{dns_record_name}.{dns_zone_name}")
 pulumi.export("sql_endpoint", f"{dns_record_name_sql}.{dns_zone_name}:15432")
-pulumi.export("public_ip",    public_ip.ip_address)
 pulumi.export("nlb_public_ip", nlb_pip.ip_address)
 pulumi.export("environment",  env)
