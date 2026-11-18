@@ -27,8 +27,6 @@ networks:
   cube_network:
     driver: bridge
 
-volumes:
-
 services:
 
   # ── CubeStore — distributed pre-aggregation cache ─────────────
