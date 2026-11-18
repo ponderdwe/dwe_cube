@@ -3,6 +3,9 @@
 # Requires: just (https://github.com/casey/just)
 # =============================================================
 
+# Cube image version — edit .cube-version to change
+cube_version := `cat .cube-version | tr -d '[:space:]'`
+
 default:
     @just --list
 
@@ -10,11 +13,11 @@ default:
 
 # Start all services (background)
 up:
-    docker compose up -d
+    CUBE_VERSION={{cube_version}} docker compose up -d
 
 # Start all services with logs
 up-logs:
-    docker compose up
+    CUBE_VERSION={{cube_version}} docker compose up
 
 # Stop all services
 down:
@@ -22,13 +25,8 @@ down:
 
 # Restart all services
 restart:
-    docker compose restart
+    CUBE_VERSION={{cube_version}} docker compose restart
 
-# ── Sync pipeline ─────────────────────────────────────────────
-
-# Run DBT → Cube → Superset sync (one-shot)
-sync:
-    docker compose --profile sync run --rm dbt-cube-sync
 
 # ── Pulumi infrastructure ─────────────────────────────────────
 

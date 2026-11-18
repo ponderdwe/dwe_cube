@@ -10,16 +10,16 @@ Managed and hydrated by [dwe-core](https://github.com/ponderdwe/dwe-core).
 
 | Service | Image | Purpose |
 |---|---|---|
-| `cube_api` | `cubejs/cube:latest` | Cube.js REST / GraphQL / SQL API |
-| `cube_refresh_worker` | `cubejs/cube:latest` | Background pre-aggregation refresh |
-| `cubestore_router` | `cubejs/cubestore:latest` | CubeStore query router |
-| `cubestore_worker_1/2` | `cubejs/cubestore:latest` | CubeStore compute workers |
+| `cube_api` | `cubejs/cube:${CUBE_VERSION}` | Cube.js REST / GraphQL / SQL API |
+| `cube_refresh_worker` | `cubejs/cube:${CUBE_VERSION}` | Background pre-aggregation refresh |
+| `cubestore_router` | `cubejs/cubestore:${CUBE_VERSION}` | CubeStore query router |
+| `cubestore_worker_1/2` | `cubejs/cubestore:${CUBE_VERSION}` | CubeStore compute workers |
 | `milvus` | `milvusdb/milvus:v2.4.6` | Vector DB for RAG |
 | `milvus-etcd` | `quay.io/coreos/etcd:v3.5.5` | Milvus metadata store |
 | `milvus-minio` | `minio/minio` | Milvus object storage |
 | `fastapi` | `pondered/cube-rag-api:latest` | RAG query API |
 | `cube-chat-ui` | `pondered/cube-chat-ui:latest` | Streamlit chat UI |
-| `dbt-cube-sync` | built from `Dockerfile.sync` | DBT → Cube → Superset sync (one-shot) |
+| `dbt-cube-sync` | built from `Dockerfile.sync` | DBT → Cube schema generation + optional S3 push (one-shot profile) |
 
 ---
 
@@ -61,6 +61,10 @@ Key variables:
 | `CUBEJS_DB_USER` | Database user |
 | `CUBEJS_DB_PASS` | Database password |
 | `CUBEJS_API_SECRET` | JWT signing secret (`openssl rand -hex 32`) |
+| `CUBE_VERSION` | Cube.js + CubeStore image version to use (e.g. `1.1.7`). Do NOT use `latest` in production. |
+| `CUBEJS_SCHEMA_S3_BUCKET` | S3 bucket for shared cube schemas. When set, Cube.js reads schemas from S3 instead of local `model/cubes/` |
+| `CUBEJS_SCHEMA_S3_PREFIX` | S3 key prefix for cube files (default: `cubes`) |
+| `CUBESTORE_REMOTE_DIR` | CubeStore remote storage path. Use `/cube/data` (local EBS, default) or `s3://bucket/cubestore` for HA |
 | `CUBEJS_SQL_PASSWORD` | Password to enable the Postgres SQL wire API on port 15432 |
 | `DATABASE_URI` | SQLAlchemy URI for dbt-cube-sync |
 | `SUPERSET_URL` | Apache Superset URL for sync |
@@ -74,6 +78,11 @@ Key variables:
 
 Cube.js schema files live in `model/cubes/`. These are automatically generated and kept in sync by `dbt-cube-sync`.
 
+Metric definitions in dbt use **MetricFlow v2 inline format** (metrics nested under the
+model in `schema.yml`). This is the only format that works end-to-end with dbt-fusion 2.x.
+For the full format reference see
+[`SEMANTIC_LAYER_FORMATS.md`](https://github.com/ponderedw/dbt-cube-sync/blob/main/SEMANTIC_LAYER_FORMATS.md).
+
 To manually trigger a sync:
 
 ```bash
@@ -83,6 +92,40 @@ just sync
 This runs:
 1. `extract_dbt_metadata.py` — exports dbt manifest
 2. `dbt-cube-sync sync-all` — generates/updates `model/cubes/*.yml` and pushes chart changes to Superset
+
+---
+
+## S3 Schema Sync (Remote-first updates)
+
+When `CUBEJS_SCHEMA_S3_BUCKET` is set, Cube.js reads cube schema files directly from S3 using its built-in `repositoryFactory`. This means you can push schema updates from your laptop or CI without SSH-ing to the server.
+
+### Push schemas from local or CI
+
+```bash
+# From local — requires dbt-cube-sync and boto3
+dbt-cube-sync sync-all \
+  --manifest dbt_metadata/manifest.json \
+  --sqlalchemy-uri "$DATABASE_URI" \
+  --output model/cubes \
+  --s3-bucket my-cube-schema-bucket
+
+# Or using the just recipe:
+just sync-s3 my-cube-schema-bucket
+```
+
+### How it works
+
+1. `dbt-cube-sync sync-all --s3-bucket` generates cube files locally and uploads them to `s3://bucket/cubes/*.js` + `s3://bucket/cubes/.schema-version`
+2. Cube.js polls `schemaVersion()` which reads `.schema-version` from S3
+3. When the version changes, Cube.js calls `repositoryFactory` to reload all schema files from S3
+
+No sidecar service, no manual EC2 access.
+
+### Requirements
+
+- `CUBEJS_SCHEMA_S3_BUCKET` set in `.env`
+- EC2 IAM role needs `s3:GetObject/ListBucket` on the schema bucket (provisioned by Pulumi when `CUBEJS_SCHEMA_S3_BUCKET` is in Secrets Manager)
+- `package.json` in the repo root installs `@aws-sdk/client-s3` on first Cube.js startup
 
 ---
 
@@ -97,6 +140,7 @@ Resources provisioned:
 - Application Load Balancer (ALB) for HTTPS on port 443
 - Route53 A record: `cube.<domain>` → ALB
 - Secrets pulled from **AWS Secrets Manager** at VM boot
+- Schema S3 bucket (optional, for remote-push schema updates)
 
 ### Azure
 
@@ -164,6 +208,7 @@ just up-logs      # start all services (foreground with logs)
 just down         # stop all services
 just restart      # restart all services
 just sync         # run DBT → Cube → Superset sync
+just sync-s3 my-bucket  # generate schemas locally and push to S3
 just logs         # follow all service logs
 just logs-service cube_api   # follow a specific service log
 just shell        # open shell in cube_api container

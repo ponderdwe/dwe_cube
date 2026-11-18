@@ -2,7 +2,7 @@
 DWE Cube Infrastructure — Azure Pulumi IaC
 Provisions: Application Gateway (HTTP→HTTPS) + VMSS + Azure DNS
 
-Single-instance VMSS (stateful — CubeStore + Milvus need persistent volumes).
+Single-instance VMSS (stateful — CubeStore needs persistent volumes).
 Rolling reimage via VMSS reimage: new instance boots, old terminates.
 Run with: pulumi stack select prod && pulumi up --yes
 """
@@ -89,6 +89,24 @@ git_deploy_username = secrets.get("git_deploy_username", "x-token-auth")
 cubejs_api_secret   = secrets["CUBEJS_API_SECRET"]
 cubejs_sql_password = secrets["CUBEJS_SQL_PASSWORD"]
 
+# ── Schema Azure Blob Storage (optional) ──────────────────────────────────────
+# Set CUBEJS_SCHEMA_AZURE_CONTAINER in secrets to enable. Format: "container"
+# or "container/subdir/path" (subdir defaults to "cubes" if omitted). Pulumi
+# creates the storage account + container and mounts it via blobfuse2 so
+# cube.js reads schemas from the filesystem — no SDK calls in cube.js needed.
+_raw_schema_container = secrets.get("CUBEJS_SCHEMA_AZURE_CONTAINER", "")
+if "/" in _raw_schema_container:
+    schema_container_name, _schema_container_subdir = _raw_schema_container.split("/", 1)
+    _schema_container_subdir = _schema_container_subdir.strip("/")
+else:
+    schema_container_name = _raw_schema_container
+    _schema_container_subdir = "cubes"
+# Storage account names: 3-24 chars, lowercase letters+digits only
+_sa_base = f"{project_name}{suffix}".replace('-', '')[:20]
+schema_storage_account_name = secrets.get(
+    "CUBEJS_SCHEMA_STORAGE_ACCOUNT", f"{_sa_base}schema"
+)[:24].lower()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # User-assigned Managed Identity (used by VMSS to read Key Vault)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,6 +117,29 @@ identity = azure_native.managedidentity.UserAssignedIdentity(
     resource_name_=f"{project_name}-identity{suffix}",
     tags=tags,
 )
+
+# ── Schema Azure Blob Storage ─────────────────────────────────────────────────
+schema_storage_account = None
+schema_blob_container  = None
+if schema_container_name:
+    schema_storage_account = azure_native.storage.StorageAccount(
+        f"{project_name}-schema-sa{suffix}",
+        resource_group_name=resource_group,
+        account_name=schema_storage_account_name,
+        location=azure_location,
+        sku=azure_native.storage.SkuArgs(name="Standard_LRS"),
+        kind="StorageV2",
+        allow_blob_public_access=False,
+        min_tls_version="TLS1_2",
+        tags={**tags, "Purpose": "cube-schema"},
+    )
+    schema_blob_container = azure_native.storage.BlobContainer(
+        f"{project_name}-schema-container{suffix}",
+        resource_group_name=resource_group,
+        account_name=schema_storage_account.name,
+        container_name=schema_container_name,
+        public_access=azure_native.storage.PublicAccess.NONE,
+    )
 
 # Key Vault Secrets User role assignment for the Managed Identity (RBAC-enabled vault)
 # Role: Key Vault Secrets User (4633458b-17de-408a-b874-0445c86b69e6)
@@ -116,6 +157,26 @@ kv_access = azure_native.authorization.RoleAssignment(
     principal_type="ServicePrincipal",
 )
 
+# Storage Blob Data Contributor role for the schema container (if created)
+# Role: Storage Blob Data Contributor (ba92f5b4-2d11-453d-a403-e96b0029c9fe)
+if schema_blob_container:
+    azure_native.authorization.RoleAssignment(
+        f"{project_name}-schema-blob-role{suffix}",
+        scope=pulumi.Output.all(
+            sa=schema_storage_account.name,
+            ct=schema_blob_container.name,
+        ).apply(lambda a: (
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.Storage/storageAccounts/{a['sa']}"
+            f"/blobServices/default/containers/{a['ct']}"
+        )),
+        role_definition_id=(
+            f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization"
+            f"/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+        ),
+        principal_id=identity.principal_id,
+        principal_type="ServicePrincipal",
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public IP for Application Gateway
@@ -405,6 +466,42 @@ nlb = azure_native.network.LoadBalancer(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# blobfuse2 — mount schema container before Docker starts (optional)
+# ─────────────────────────────────────────────────────────────────────────────
+if schema_container_name:
+    _schema_mount_block = f"""
+# Install blobfuse2 from Microsoft package repository
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main' > /etc/apt/sources.list.d/msprod.list
+apt-get update -y && apt-get install -y blobfuse2
+mkdir -p /mnt/cube-schema /tmp/blobfuse2-cache
+cat > /etc/cube-blobfuse2.yaml <<'BFEOF'
+logging:
+  type: syslog
+  level: log_warning
+components:
+  - libfuse
+  - block_cache
+  - attr_cache
+  - azstorage
+libfuse:
+  allow-other: true
+  attribute-expiration-sec: 300
+  entry-expiration-sec: 300
+azstorage:
+  type: block
+  account-name: {schema_storage_account_name}
+  container: {schema_container_name}
+  subdirectory: {_schema_container_subdir}
+  mode: msi
+BFEOF
+blobfuse2 mount /mnt/cube-schema --config-file=/etc/cube-blobfuse2.yaml --tmp-path=/tmp/blobfuse2-cache
+echo 'CUBE_SCHEMA_MOUNT=/mnt/cube-schema' >> /home/ubuntu/cube/.env
+"""
+else:
+    _schema_mount_block = ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # VMSS user data — install Docker, clone repo, write .env from Key Vault
 # ─────────────────────────────────────────────────────────────────────────────
 user_data_script = f"""#!/bin/bash
@@ -438,11 +535,10 @@ REPO_URL="{git_repo_url}"
 REPO_PATH=$(echo "$REPO_URL" | sed 's,https://,,')
 git clone "https://$GIT_USER:$GIT_TOKEN@$REPO_PATH" /home/ubuntu/cube
 git -C /home/ubuntu/cube checkout {git_branch}
-git -C /home/ubuntu/cube rev-parse HEAD > /home/ubuntu/cube/.schema-version
 
 # Write .env from all secret key=value pairs
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
-
+{_schema_mount_block}
 cd /home/ubuntu/cube && docker-compose up -d
 """
 custom_data = base64.b64encode(user_data_script.encode()).decode()
@@ -483,8 +579,8 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         storage_profile=azure_native.compute.VirtualMachineScaleSetStorageProfileArgs(
             image_reference=azure_native.compute.ImageReferenceArgs(
                 publisher="Canonical",
-                offer="0001-com-ubuntu-server-focal",
-                sku="20_04-lts-gen2",
+                offer="0001-com-ubuntu-server-jammy",
+                sku="22_04-lts-gen2",
                 version="latest",
             ),
             os_disk=azure_native.compute.VirtualMachineScaleSetOSDiskArgs(
@@ -632,3 +728,6 @@ pulumi.export("url",          f"https://{dns_record_name}.{dns_zone_name}")
 pulumi.export("sql_endpoint", f"{dns_record_name_sql}.{dns_zone_name}:15432")
 pulumi.export("nlb_public_ip", nlb_pip.ip_address)
 pulumi.export("environment",  env)
+if schema_blob_container:
+    pulumi.export("schema_azure_container",       schema_blob_container.name)
+    pulumi.export("schema_azure_storage_account", schema_storage_account.name)

@@ -1,10 +1,25 @@
-# DWE Cube — Full Stack Docker Compose
-# Includes: Cube.js + CubeStore + Milvus (RAG) + FastAPI + Streamlit UI
+# DWE Cube — Docker Compose
+# Includes: Cube.js API + CubeStore (router + 2 workers)
 #
 # Usage:
-#   cp .env.example .env  # fill in values
+#   cp .env.example .env  # fill in secrets
 #   docker compose up -d
-#   just sync             # run DBT → Cube → Superset sync
+#
+# Image: remote cubejs/cube image — no local build needed.
+#   Override CUBE_IMAGE in .env to use a custom registry image.
+#   Override CUBE_VERSION in .env to pin a different release.
+#
+# Version pinning — edit .cube-version to change (passed in by justfile as CUBE_VERSION).
+#
+# Schema source: set CUBEJS_SCHEMA_S3_BUCKET (AWS) or
+#   CUBEJS_SCHEMA_AZURE_ACCOUNT + CUBEJS_SCHEMA_AZURE_CONTAINER (Azure) in .env
+#   to read schemas from object storage. CI writes schemas there via dbt-cube-sync.
+#   Without these vars, schemas are read from model/cubes/ on disk.
+#
+# CubeStore remote storage (set in .env for production):
+#   CUBESTORE_REMOTE_DIR=/cube/data            # local EBS/disk (default)
+#   CUBESTORE_REMOTE_DIR=s3://bucket/cubestore  # AWS S3
+#   CUBESTORE_REMOTE_DIR=azure://container/cubestore # Azure Blob
 
 version: "3.9"
 
@@ -13,64 +28,71 @@ networks:
     driver: bridge
 
 volumes:
-  milvus-data:
-  milvus-etcd-data:
-  seaweedfs-data:
 
 services:
 
   # ── CubeStore — distributed pre-aggregation cache ─────────────
+  # CUBE_VERSION is set from .cube-version via the justfile.
+  # Set CUBESTORE_REMOTE_DIR in .env to an S3/Azure path for HA deployments.
   cubestore_router:
-    image: cubejs/cubestore:latest
+    image: cubejs/cubestore:${CUBE_VERSION}
     platform: linux/amd64
     restart: always
     environment:
       - CUBESTORE_WORKERS=cubestore_worker_1:10001,cubestore_worker_2:10002
-      - CUBESTORE_REMOTE_DIR=/cube/data
+      - CUBESTORE_REMOTE_DIR=${CUBESTORE_REMOTE_DIR:-/cube/data}
       - CUBESTORE_META_PORT=9999
       - CUBESTORE_SERVER_NAME=cubestore_router:9999
     volumes:
       - .cubestore:/cube/data
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:3030/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - cube_network
 
   cubestore_worker_1:
-    image: cubejs/cubestore:latest
+    image: cubejs/cubestore:${CUBE_VERSION}
     platform: linux/amd64
     restart: always
     environment:
       - CUBESTORE_WORKERS=cubestore_worker_1:10001,cubestore_worker_2:10002
       - CUBESTORE_SERVER_NAME=cubestore_worker_1:10001
       - CUBESTORE_WORKER_PORT=10001
-      - CUBESTORE_REMOTE_DIR=/cube/data
+      - CUBESTORE_REMOTE_DIR=${CUBESTORE_REMOTE_DIR:-/cube/data}
       - CUBESTORE_META_ADDR=cubestore_router:9999
     volumes:
       - .cubestore:/cube/data
     depends_on:
-      - cubestore_router
+      cubestore_router:
+        condition: service_healthy
     networks:
       - cube_network
 
   cubestore_worker_2:
-    image: cubejs/cubestore:latest
+    image: cubejs/cubestore:${CUBE_VERSION}
     platform: linux/amd64
     restart: always
     environment:
       - CUBESTORE_WORKERS=cubestore_worker_1:10001,cubestore_worker_2:10002
       - CUBESTORE_SERVER_NAME=cubestore_worker_2:10002
       - CUBESTORE_WORKER_PORT=10002
-      - CUBESTORE_REMOTE_DIR=/cube/data
+      - CUBESTORE_REMOTE_DIR=${CUBESTORE_REMOTE_DIR:-/cube/data}
       - CUBESTORE_META_ADDR=cubestore_router:9999
     volumes:
       - .cubestore:/cube/data
     depends_on:
-      - cubestore_router
+      cubestore_router:
+        condition: service_healthy
     networks:
       - cube_network
 
   # ── Cube.js refresh worker ─────────────────────────────────────
   cube_refresh_worker:
-    image: cubejs/cube:latest
+    image: ${CUBE_IMAGE:-cubejs/cube:${CUBE_VERSION}}
     restart: always
     env_file: .env
     environment:
@@ -78,18 +100,23 @@ services:
       - CUBEJS_EXT_DB_TYPE=cubestore
       - CUBEJS_EXT_DB_HOST=cubestore_router
       - CUBEJS_REFRESH_WORKER=true
+      - CUBEJS_DEV_MODE=false
     volumes:
       - .:/cube/conf
+      - ${CUBE_SCHEMA_MOUNT:-./model/cubes}:/cube/conf/model/cubes
     depends_on:
-      - cubestore_router
-      - cubestore_worker_1
-      - cubestore_worker_2
+      cubestore_router:
+        condition: service_healthy
+      cubestore_worker_1:
+        condition: service_started
+      cubestore_worker_2:
+        condition: service_started
     networks:
       - cube_network
 
   # ── Cube.js API ────────────────────────────────────────────────
   cube_api:
-    image: cubejs/cube:latest
+    image: ${CUBE_IMAGE:-cubejs/cube:${CUBE_VERSION}}
     restart: always
     ports:
       - "4000:4000"
@@ -100,148 +127,25 @@ services:
       - CUBEJS_EXT_DB_TYPE=cubestore
       - CUBEJS_EXT_DB_HOST=cubestore_router
       - CUBEJS_DEFAULT_API_SCOPES=meta,data,graphql,jobs,sql
+      - CUBEJS_DEV_MODE=false
     volumes:
       - .:/cube/conf
-    depends_on:
-      - cube_refresh_worker
-      - cubestore_router
-      - cubestore_worker_1
-      - cubestore_worker_2
-    networks:
-      - cube_network
-
-  # ── Milvus vector DB — for RAG ─────────────────────────────────
-  milvus-etcd:
-    image: quay.io/coreos/etcd:v3.5.5
-    restart: always
-    environment:
-      - ETCD_AUTO_COMPACTION_MODE=revision
-      - ETCD_AUTO_COMPACTION_RETENTION=1000
-      - ETCD_QUOTA_BACKEND_BYTES=4294967296
-      - ETCD_SNAPSHOT_COUNT=50000
-    volumes:
-      - milvus-etcd-data:/etcd
-    command: >
-      etcd
-      -advertise-client-urls=http://127.0.0.1:2379
-      -listen-client-urls=http://0.0.0.0:2379
-      --data-dir=/etcd
+      - ${CUBE_SCHEMA_MOUNT:-./model/cubes}:/cube/conf/model/cubes
     healthcheck:
-      test: ["CMD", "etcdctl", "endpoint", "health"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    networks:
-      - cube_network
-
-  milvus-minio:
-    image: chrislusf/seaweedfs:latest
-    restart: always
-    command: server -s3 -dir=/data -master.volumeSizeLimitMB=256
-    volumes:
-      - seaweedfs-data:/data
-    healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://$(hostname -i):8333/ > /dev/null"]
+      test: ["CMD", "curl", "-fs", "http://localhost:4000/readyz"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 15s
-    networks:
-      - cube_network
-
-  milvus:
-    image: milvusdb/milvus:v2.4.6
-    restart: always
-    command: ["milvus", "run", "standalone"]
-    security_opt:
-      - seccomp:unconfined
-    environment:
-      ETCD_ENDPOINTS: milvus-etcd:2379
-      MINIO_ADDRESS: milvus-minio:8333
-      MINIO_ACCESS_KEY_ID: minioadmin
-      MINIO_SECRET_ACCESS_KEY: minioadmin
-      MINIO_USE_SSL: "false"
-    volumes:
-      - milvus-data:/var/lib/milvus
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
-      interval: 30s
-      start_period: 90s
-      timeout: 20s
-      retries: 3
+      start_period: 60s
     depends_on:
-      milvus-etcd:
+      cube_refresh_worker:
+        condition: service_started
+      cubestore_router:
         condition: service_healthy
-      milvus-minio:
-        condition: service_healthy
-    networks:
-      cube_network:
-        aliases:
-          - milvus-standalone
-
-  # ── RAG FastAPI service ────────────────────────────────────────
-  fastapi:
-    image: pondered/cube-rag-api:latest
-    restart: always
-    env_file: .env
-    depends_on:
-      milvus:
-        condition: service_healthy
-      cube_api:
+      cubestore_worker_1:
+        condition: service_started
+      cubestore_worker_2:
         condition: service_started
     networks:
       - cube_network
 
-  # ── Streamlit chat UI ──────────────────────────────────────────
-  cube-chat-ui:
-    image: pondered/cube-chat-ui:latest
-    restart: always
-    env_file: .env
-    ports:
-      - "8501:8501"
-    depends_on:
-      - fastapi
-    networks:
-      - cube_network
-
-  # ── DBT → Cube → Superset sync ─────────────────────────────────
-  dbt-cube-sync:
-    build:
-      context: .
-      dockerfile: Dockerfile.sync
-    volumes:
-      - .:/workspace
-      - ./.sync-state:/workspace/.sync-state
-    working_dir: /workspace
-    env_file: .env
-    depends_on:
-      cube_api:
-        condition: service_started
-      fastapi:
-        condition: service_started
-    entrypoint: []
-    command:
-      - "/bin/sh"
-      - "-c"
-      - |
-        echo 'Waiting for services...'
-        sleep 15
-        echo 'Step 1: Extracting dbt metadata...'
-        python extract_dbt_metadata.py
-        echo 'Step 2: Running incremental sync pipeline...'
-        dbt-cube-sync sync-all \
-          --manifest dbt_metadata/manifest.json \
-          --sqlalchemy-uri "$$DATABASE_URI" \
-          --output model/cubes \
-          --state-path .sync-state/.dbt-cube-sync-state.json \
-          --superset-url "$$SUPERSET_URL" \
-          --superset-username "$$SUPERSET_USERNAME" \
-          --superset-password "$$SUPERSET_PASSWORD" \
-          --cube-connection-name Cube \
-          --rag-api-url http://fastapi:8080
-        echo 'Step 3: Bumping .schema-version so Cube.js reloads the schema...'
-        date -u +%Y%m%dT%H%M%SZ > .schema-version
-    networks:
-      - cube_network
-    profiles:
-      - sync

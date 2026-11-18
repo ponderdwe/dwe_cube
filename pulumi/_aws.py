@@ -99,6 +99,36 @@ cubejs_sql_password = secrets["CUBEJS_SQL_PASSWORD"]
 ec2_dns_zone_id = secrets.get("HOSTED_ZONE_ID_EC2_DNS", "")
 ec2_dns_name    = secrets.get("EC2_DNS", "")
 
+# ── Schema S3 bucket (optional) ───────────────────────────────────────────────
+# Set CUBEJS_SCHEMA_S3_BUCKET in secrets to enable. Format: "bucket-name" or
+# "bucket-name/path/prefix" (prefix defaults to "cubes" if omitted). Pulumi
+# creates the bucket and mounts it onto the EC2 instance via Mountpoint for S3
+# so cube.js reads schemas from the filesystem — no SDK calls in cube.js needed.
+_raw_schema_bucket = secrets.get("CUBEJS_SCHEMA_S3_BUCKET", "")
+if "/" in _raw_schema_bucket:
+    schema_bucket_name, _schema_bucket_prefix = _raw_schema_bucket.split("/", 1)
+    _schema_bucket_prefix = _schema_bucket_prefix.strip("/")
+else:
+    schema_bucket_name = _raw_schema_bucket
+    _schema_bucket_prefix = "cubes"
+
+schema_bucket = None
+if schema_bucket_name:
+    schema_bucket = aws.s3.Bucket(
+        f"{project_name}-schema{suffix}",
+        bucket=schema_bucket_name,
+        versioning=aws.s3.BucketVersioningArgs(enabled=True),
+        tags={**tags, "Purpose": "cube-schema"},
+    )
+    aws.s3.BucketPublicAccessBlock(
+        f"{project_name}-schema-acl{suffix}",
+        bucket=schema_bucket.id,
+        block_public_acls=True,
+        block_public_policy=True,
+        ignore_public_acls=True,
+        restrict_public_buckets=True,
+    )
+
 # ─────────────────────────────────────────────────────────────────────────────
 # IAM — EC2 role (SSM + Bedrock + Secrets Manager)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,6 +144,19 @@ instance_role = aws.iam.Role(
 aws.iam.RolePolicyAttachment(f"{project_name}-ssm{suffix}",     role=instance_role.name, policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore")
 aws.iam.RolePolicyAttachment(f"{project_name}-bedrock{suffix}", role=instance_role.name, policy_arn="arn:aws:iam::aws:policy/AmazonBedrockFullAccess")
 aws.iam.RolePolicyAttachment(f"{project_name}-sm{suffix}",      role=instance_role.name, policy_arn="arn:aws:iam::aws:policy/SecretsManagerReadWrite")
+if schema_bucket:
+    aws.iam.RolePolicy(
+        f"{project_name}-schema-s3{suffix}",
+        role=instance_role.name,
+        policy=schema_bucket.arn.apply(lambda arn: json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+                "Resource": [arn, f"{arn}/*"],
+            }],
+        })),
+    )
 if ec2_dns_zone_id:
     # Allow instance to update its own Route53 A record on boot (handles post-refresh IP changes)
     aws.iam.RolePolicy(
@@ -201,7 +244,7 @@ aws.ec2.SecurityGroupRule(f"{project_name}-ec2-egress{suffix}",
 ubuntu_ami = aws.ec2.get_ami(
     most_recent=True,
     filters=[
-        aws.ec2.GetAmiFilterArgs(name="name",               values=["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]),
+        aws.ec2.GetAmiFilterArgs(name="name",               values=["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]),
         aws.ec2.GetAmiFilterArgs(name="virtualization-type", values=["hvm"]),
     ],
     owners=["099720109477"],
@@ -253,6 +296,37 @@ else:
     _r53_sql_block = ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Mountpoint for S3 — mount schema bucket before Docker starts (optional)
+# ─────────────────────────────────────────────────────────────────────────────
+if schema_bucket_name:
+    _schema_mount_block = f"""
+# Install Mountpoint for S3
+wget -q https://s3.amazonaws.com/mountpoint-s3-release/latest/x86_64/mount-s3.deb -O /tmp/mount-s3.deb
+apt-get install -y /tmp/mount-s3.deb
+mkdir -p /mnt/cube-schema
+echo 'user_allow_other' >> /etc/fuse.conf
+mount-s3 {schema_bucket_name} /mnt/cube-schema --prefix {_schema_bucket_prefix}/ --allow-other --region {aws_region}
+# Persist mount across reboots via systemd
+cat > /etc/systemd/system/cube-schema-mount.service <<'UNIT'
+[Unit]
+Description=Cube schema S3 mount
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mount-s3 {schema_bucket_name} /mnt/cube-schema --prefix {_schema_bucket_prefix}/ --allow-other --region {aws_region}
+ExecStop=/bin/umount /mnt/cube-schema
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl enable cube-schema-mount.service
+echo 'CUBE_SCHEMA_MOUNT=/mnt/cube-schema' >> /home/ubuntu/cube/.env
+"""
+else:
+    _schema_mount_block = ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # User data — install Docker, clone repo, write .env from Secrets Manager
 # ─────────────────────────────────────────────────────────────────────────────
 user_data_script = f"""#!/bin/bash
@@ -287,11 +361,10 @@ REPO_URL="{git_repo_url}"
 REPO_PATH=$(echo "$REPO_URL" | sed 's,https://,,')
 git clone "https://$GIT_USER:$GIT_TOKEN@$REPO_PATH" /home/ubuntu/cube
 git -C /home/ubuntu/cube checkout {git_branch}
-git -C /home/ubuntu/cube rev-parse HEAD > /home/ubuntu/cube/.schema-version
 
 # Write .env from all secret key=value pairs
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/cube/.env
-
+{_schema_mount_block}
 cd /home/ubuntu/cube && docker-compose up -d
 {_r53_block}{_r53_sql_block}"""
 user_data = base64.b64encode(user_data_script.encode()).decode()
@@ -500,3 +573,5 @@ pulumi.export("url",          f"https://{dns_name}")
 pulumi.export("sql_endpoint", f"{_dns_fqdn_sql}:15432")
 pulumi.export("asg_name",     asg.name)
 pulumi.export("environment",  env)
+if schema_bucket:
+    pulumi.export("schema_s3_bucket", schema_bucket.id)
