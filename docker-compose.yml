@@ -21,8 +21,6 @@
 #   CUBESTORE_REMOTE_DIR=s3://bucket/cubestore  # AWS S3
 #   CUBESTORE_REMOTE_DIR=azure://container/cubestore # Azure Blob
 
-version: "3.9"
-
 networks:
   cube_network:
     driver: bridge
@@ -43,12 +41,6 @@ services:
       - CUBESTORE_SERVER_NAME=cubestore_router:9999
     volumes:
       - .cubestore:/cube/data
-    healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:3030/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
     networks:
       - cube_network
 
@@ -65,8 +57,7 @@ services:
     volumes:
       - .cubestore:/cube/data
     depends_on:
-      cubestore_router:
-        condition: service_healthy
+      - cubestore_router
     networks:
       - cube_network
 
@@ -83,8 +74,7 @@ services:
     volumes:
       - .cubestore:/cube/data
     depends_on:
-      cubestore_router:
-        condition: service_healthy
+      - cubestore_router
     networks:
       - cube_network
 
@@ -103,12 +93,9 @@ services:
       - .:/cube/conf
       - ${CUBE_SCHEMA_MOUNT:-./model/cubes}:/cube/conf/model/cubes
     depends_on:
-      cubestore_router:
-        condition: service_healthy
-      cubestore_worker_1:
-        condition: service_started
-      cubestore_worker_2:
-        condition: service_started
+      - cubestore_router
+      - cubestore_worker_1
+      - cubestore_worker_2
     networks:
       - cube_network
 
@@ -129,21 +116,10 @@ services:
     volumes:
       - .:/cube/conf
       - ${CUBE_SCHEMA_MOUNT:-./model/cubes}:/cube/conf/model/cubes
-    healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:4000/readyz"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
     depends_on:
-      cube_refresh_worker:
-        condition: service_started
-      cubestore_router:
-        condition: service_healthy
-      cubestore_worker_1:
-        condition: service_started
-      cubestore_worker_2:
-        condition: service_started
+      - cube_refresh_worker
+      - cubestore_router
+      - cubestore_worker_1
+      - cubestore_worker_2
     networks:
       - cube_network
-
